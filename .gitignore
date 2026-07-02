@@ -1,0 +1,8 @@
+.kilo
+.kilocode
+bin/
+data/
+cnc.yaml
+srv.yaml
+last_provider.json
+*.tar.gz
