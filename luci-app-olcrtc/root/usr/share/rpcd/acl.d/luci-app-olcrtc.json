@@ -1,0 +1,36 @@
+{
+	"luci-app-olcrtc": {
+		"description": "Grant access to olcrtc-bot ubus methods",
+		"read": {
+			"ubus": {
+				"olcrtc-bot": [
+					"get_status",
+					"get_env",
+					"get_singbox",
+					"get_firewall",
+					"get_logs",
+					"ping_dns",
+					"ping_tunnel",
+				"get_whitelist",
+				"generate_key",
+				"test_socks_proxy"
+				],
+				"uci": [
+					"firewall.singbox_tproxy.path"
+				]
+			}
+		},
+		"write": {
+			"ubus": {
+				"olcrtc-bot": [
+					"set_env",
+					"service_action",
+					"set_route",
+					"set_whitelist",
+					"set_provider",
+					"clear_provider"
+				]
+			}
+		}
+	}
+}

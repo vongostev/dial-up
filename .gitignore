@@ -1,8 +1,13 @@
 .kilo
 .kilocode
-bin/
+.idea
+bin/*.tgz
 data/
-cnc.yaml
-srv.yaml
+# cnc.yaml
+# srv.yaml
 last_provider.json
 *.tar.gz
+/bin/dial-up
+stripmarkup
+.gitignore
+.githooks/post-merge

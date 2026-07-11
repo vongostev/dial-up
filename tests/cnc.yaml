@@ -1,0 +1,19 @@
+mode: cnc
+auth:
+  provider: wbstream
+room:
+  id: "abc"
+crypto:
+  key: ""
+net:
+  transport: vp8channel
+  dns: "77.88.8.8:53"
+socks:
+  host: "127.0.0.1"
+  port: 1080
+data: data
+debug: false
+liveness:
+  interval: 10s
+  timeout: 7s
+  failures: 3
