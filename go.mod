@@ -1,4 +1,4 @@
-module olcrtc-vk-bot
+module dial-up
 
 go 1.26
 

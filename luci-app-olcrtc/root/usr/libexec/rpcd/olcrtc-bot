@@ -1,0 +1,750 @@
+#!/bin/sh
+# luci-app-olcrtc rpcd backend — POSIX shell ubus bridge
+# Exposes 15 methods for LuCI JS views. Reads/writes env, JSON configs,
+# queries init.d, Clash API, nftables, conntrack, logread.
+
+set -e
+
+ENV_FILE="/etc/dial-up.env"
+LAST_PROVIDER_FILE="/last_provider.json"
+
+# Parse LAST_PROVIDER_FILE path from env if present
+if [ -f "$ENV_FILE" ]; then
+    _lpf=$(grep '^LAST_PROVIDER_FILE=' "$ENV_FILE" | head -1 | cut -d= -f2-)
+    if [ -n "$_lpf" ]; then
+        # Relative path — resolve against root (CWD where init.d runs)
+        case "$_lpf" in
+            /*) LAST_PROVIDER_FILE="$_lpf" ;;
+            *)  LAST_PROVIDER_FILE="/$_lpf" ;;
+        esac
+    fi
+fi
+
+# Local Go status endpoint port (loopback). 9091 by default; 9090 is the
+# sing-box Clash API. Read from env so it tracks the bot's STATUS_PORT.
+STATUS_PORT="9091"
+if [ -f "$ENV_FILE" ]; then
+    _sp=$(grep '^STATUS_PORT=' "$ENV_FILE" | head -1 | cut -d= -f2-)
+    [ -n "$_sp" ] && STATUS_PORT="$_sp"
+fi
+
+json_init() { echo '{'; }
+json_add_string() { echo "\"$1\":\"$2\""; }
+json_add_int() { echo "\"$1\":$2"; }
+json_add_bool() { echo "\"$1\":$2"; }
+json_add_null() { echo "\"$1\":null"; }
+json_close() { echo '}'; }
+
+_json_escape() {
+    printf '%s' "$1" | sed 's/"/\\"/g; s/\\n/\\\\n/g'
+}
+
+_write_json_kv() {
+    local comma="$1" key="$2" val="$3"
+    [ "$comma" = "1" ] && printf ','
+    printf '"%s":"%s"' "$key" "$val"
+}
+
+_read_env() {
+    [ ! -f "$ENV_FILE" ] && return
+    while IFS='=' read -r k v || [ -n "$k" ]; do
+        k=$(echo "$k" | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')
+        [ -z "$k" ] && continue
+        echo "$k" | grep -q '^#' && continue
+        printf '%s=%s\n' "$k" "$v"
+    done < "$ENV_FILE"
+}
+
+_get_env_value() {
+    _read_env | grep "^$1=" | head -1 | cut -d= -f2-
+}
+
+# ── rpcd introspection ──────────────────────────────────────
+list() {
+    cat <<'JSONLIST'
+{
+"get_status":{"running":{"type":"boolean"},"is_client":{"type":"boolean"},"provider":{"type":"array"},"transport":{"type":"string"},"uptime_seconds":{"type":"int64"},"last_started":{"type":"string"},"last_stopped":{"type":"string"},"last_error":{"type":"string"},"last_exit_code":{"type":"int64"},"failures":{"type":"int64"},"crash_failures":{"type":"int64"},"dns_ping":{"type":"string"}},
+"get_env":{},
+"set_env":{"env":{"type":"object"},"restart":{"type":"boolean"}},
+"service_action":{"action":{"type":"string"}},
+"get_singbox":{},
+"set_route":{"mode":{"type":"string"}},
+"get_firewall":{},
+"get_logs":{"source":{"type":"string"},"lines":{"type":"int64"},"filter":{"type":"string"}},
+"ping_dns":{},
+"ping_tunnel":{},
+"get_whitelist":{},
+"set_whitelist":{"domains":{"type":"array"}},
+"set_provider":{"url":{"type":"string"}},
+"clear_provider":{},
+"generate_key":{},
+"test_socks_proxy":{"addr":{"type":"string"},"port":{"type":"string"},"user":{"type":"string"},"pass":{"type":"string"}}
+}
+JSONLIST
+}
+
+# ── Dispatch ─────────────────────────────────────────────────
+call() {
+    method="$1"
+    shift
+    case "$method" in
+        get_status)      get_status ;;
+        get_env)         get_env ;;
+        set_env)         set_env "$@" ;;
+        service_action)  service_action "$@" ;;
+        get_singbox)     get_singbox ;;
+        set_route)       set_route "$@" ;;
+        get_firewall)    get_firewall ;;
+        get_logs)        get_logs "$@" ;;
+        ping_dns)        ping_dns ;;
+        ping_tunnel)     ping_tunnel ;;
+        get_whitelist)   get_whitelist ;;
+        set_whitelist)   set_whitelist "$@" ;;
+        set_provider)    set_provider "$@" ;;
+        clear_provider)  clear_provider ;;
+        generate_key)    generate_key ;;
+        test_socks_proxy) test_socks_proxy "$@" ;;
+        *)               printf '{"error":"unknown method: %s"}\n' "$method" ;;
+    esac
+}
+
+# ── get_status ───────────────────────────────────────────────
+# Authoritative path: query the Go bot local status endpoint
+# (127.0.0.1:STATUS_PORT/status) and normalize the controller.Status JSON
+# into the LuCI contract below. Falls back to get_status_syslog() (legacy
+# syslog reconstruction) when the endpoint is down or jsonfilter is absent,
+# so the panel never hard-fails.
+#
+# Expected ubus call olcrtc-bot get_status output shape (normalized):
+#   {"running":<bool>,"is_client":<bool>,"provider":<["kind","room_id"]|null>,
+#    "transport":"vp8channel","uptime_seconds":<int>,
+#    "last_started":"YYYY-MM-DD HH:MM:SS","last_stopped":"...",
+#    "last_error":"<str>","last_exit_code":<int|null>,
+#    "failures":<int>,"crash_failures":<int>,"dns_ping":"<str>"}
+get_status() {
+    if command -v jsonfilter >/dev/null 2>&1; then
+        _resp=""
+        if command -v wget >/dev/null 2>&1; then
+            _resp=$(wget -q -O - --timeout=2 "http://127.0.0.1:${STATUS_PORT}/status" 2>/dev/null || true)
+        fi
+        if [ -z "$_resp" ] && command -v curl >/dev/null 2>&1; then
+            _resp=$(curl -s --max-time 2 "http://127.0.0.1:${STATUS_PORT}/status" 2>/dev/null || true)
+        fi
+        if [ -n "$_resp" ]; then
+            _hp=$(jsonfilter -s "$_resp" -e '@.has_process' 2>/dev/null || echo "")
+            if [ -n "$_hp" ]; then
+                get_status_from_go "$_resp"
+                return
+            fi
+        fi
+    fi
+    get_status_syslog
+}
+
+# Normalize a Go controller.Status JSON payload ($1) into the LuCI contract.
+get_status_from_go() {
+    _resp="$1"
+
+    _hp=$(jsonfilter -s "$_resp" -e '@.has_process' 2>/dev/null || echo "false")
+    running="false"
+    [ "$_hp" = "true" ] && running="true"
+
+    is_client="false"
+    _ic=$(_get_env_value "IS_CLIENT")
+    [ "$_ic" = "true" ] && is_client="true"
+
+    # Provider → ["kind","room_id"] or null
+    provider="null"
+    _pk=$(jsonfilter -s "$_resp" -e '@.provider.kind' 2>/dev/null || echo "")
+    _pr=$(jsonfilter -s "$_resp" -e '@.provider.room_id' 2>/dev/null || echo "")
+    if [ -n "$_pk" ]; then
+        provider='["'"$_pk"'","'"$_pr"'"]'
+    fi
+
+    transport="vp8channel"
+
+    _pstarted=$(jsonfilter -s "$_resp" -e '@.process_started' 2>/dev/null || echo "")
+    _pstopped=$(jsonfilter -s "$_resp" -e '@.process_stopped' 2>/dev/null || echo "")
+    last_started=$(_fmt_rfc3339 "$_pstarted")
+    last_stopped=$(_fmt_rfc3339 "$_pstopped")
+
+    uptime_seconds=0
+    if [ -n "$_pstarted" ] && [ "$_pstarted" != "null" ]; then
+        _now=$(date +%s)
+        _start_sec=$(_rfc3339_to_epoch "$_pstarted")
+        if [ "$_start_sec" -gt 0 ] 2>/dev/null; then
+            uptime_seconds=$((_now - _start_sec))
+        fi
+    fi
+
+    last_error=$(jsonfilter -s "$_resp" -e '@.last_error' 2>/dev/null || echo "")
+    _lec=$(jsonfilter -s "$_resp" -e '@.last_exit_code' 2>/dev/null || echo "")
+    last_exit_code="null"
+    if [ -n "$_lec" ] && [ "$_lec" != "null" ]; then
+        last_exit_code="$_lec"
+    fi
+
+    failures=$(jsonfilter -s "$_resp" -e '@.failures' 2>/dev/null || echo 0)
+    [ -z "$failures" ] && failures=0
+    crash_failures=$(jsonfilter -s "$_resp" -e '@.crash_failures' 2>/dev/null || echo 0)
+    [ -z "$crash_failures" ] && crash_failures=0
+
+    dns_ping=$(jsonfilter -s "$_resp" -e '@.ping_dns' 2>/dev/null || echo "")
+    if [ -z "$dns_ping" ]; then
+        dns_ping=$(_measure_dns_ping)
+    fi
+
+    printf '{"running":%s,"is_client":%s,"provider":%s,"transport":"%s","uptime_seconds":%d,' "$running" "$is_client" "$provider" "$transport" "$uptime_seconds"
+    printf '"last_started":"%s","last_stopped":"%s",' "$(printf '%s' "$last_started" | sed 's/"/\\"/g')" "$(printf '%s' "$last_stopped" | sed 's/"/\\"/g')"
+    printf '"last_error":"%s","last_exit_code":%s,' "$(printf '%s' "$last_error" | sed 's/"/\\"/g')" "$last_exit_code"
+    printf '"failures":%d,"crash_failures":%d,"dns_ping":"%s"}\n' "$failures" "$crash_failures" "$dns_ping"
+}
+
+# Format an RFC3339 (or null/empty) timestamp as "YYYY-MM-DD HH:MM:SS".
+_fmt_rfc3339() {
+    [ -z "$1" ] && { echo ""; return; }
+    [ "$1" = "null" ] && { echo ""; return; }
+    _f=$(date -d "$1" '+%Y-%m-%d %H:%M:%S' 2>/dev/null) || _f=""
+    if [ -n "$_f" ]; then
+        echo "$_f"
+        return
+    fi
+    echo "$1" | sed 's/T/ /; s/\.[0-9]*//; s/+[0-9:]*$//; s/Z$//'
+}
+
+# Convert an RFC3339 timestamp to epoch seconds. Busybox date cannot parse
+# ISO-8601 offsets (e.g. "+03:00"), so the string is normalized to
+# "YYYY-MM-DD HH:MM:SS" (local time) before date -d. Returns 0 on failure.
+_rfc3339_to_epoch() {
+    [ -z "$1" ] && { echo 0; return; }
+    [ "$1" = "null" ] && { echo 0; return; }
+    _norm=$(echo "$1" | sed 's/T/ /; s/\.[0-9]*//; s/+[0-9:]*$//; s/Z$//')
+    _sec=$(date -d "$_norm" +%s 2>/dev/null) || _sec=0
+    echo "${_sec:-0}"
+}
+
+# Best-effort DNS liveness via TCP connect to 9.9.9.9:53. Returns e.g. "12ms".
+_measure_dns_ping() {
+    _dns="unavailable"
+    _s=$(date +%s%N 2>/dev/null || echo 0)
+    if nc -z -w2 9.9.9.9 53 2>/dev/null; then
+        _e=$(date +%s%N 2>/dev/null || echo 0)
+        _el=$(( (_e - _s) / 1000000 ))
+        [ "$_el" -gt 0 ] 2>/dev/null && _dns="${_el}ms" || _dns="<1ms"
+    fi
+    echo "$_dns"
+}
+
+# ── get_status fallback (legacy syslog reconstruction) ───────
+get_status_syslog() {
+    # Service running?
+    running="false"
+    /etc/init.d/dial-up running 2>/dev/null && running="true"
+
+    # IS_CLIENT
+    is_client="false"
+    _ic=$(_get_env_value "IS_CLIENT")
+    [ "$_ic" = "true" ] && is_client="true"
+
+    # Provider
+    provider="null"
+    if [ -f "$LAST_PROVIDER_FILE" ]; then
+        provider=$(cat "$LAST_PROVIDER_FILE" 2>/dev/null || echo "null")
+    fi
+
+    # Transport — currently hardcoded in bot YAML templates
+    transport="vp8channel"
+
+    # Process uptime and last_started
+    uptime_seconds=0
+    last_started=""
+    if [ "$running" = "true" ]; then
+        _pid=$(ps | grep '[o]lcrtc-vk-bot' | awk '{print $1}' | head -1)
+        if [ -n "$_pid" ] && [ "$_pid" -gt 0 ] 2>/dev/null; then
+            _start=$(ps -o lstart= -p "$_pid" 2>/dev/null) || true
+            if [ -n "$_start" ]; then
+                _now=$(date +%s)
+                _start_sec=$(date -d "$_start" +%s 2>/dev/null) || _start_sec=0
+                if [ "$_start_sec" -gt 0 ]; then
+                    uptime_seconds=$((_now - _start_sec))
+                    last_started=$(date -d "$_start" '+%Y-%m-%d %H:%M:%S' 2>/dev/null || echo "$_start")
+                fi
+            fi
+        fi
+    fi
+
+    # Last stopped and last started from log
+    last_stopped=""
+    _log=$(logread -e "dial-up" -l 200 2>/dev/null | tail -100 || true)
+
+    # Try to extract last start event from log
+    if [ -z "$last_started" ]; then
+        _started_line=$(echo "$_log" | grep -i 'start\|Loop started' | tail -1)
+        if [ -n "$_started_line" ]; then
+            last_started=$(echo "$_started_line" | awk '{print $1, $2, $3}')
+        fi
+    fi
+
+    # Extract last stop event from log
+    _stopped_line=$(echo "$_log" | grep -i 'stop\|shutdown\|exit\|killed' | tail -1)
+    if [ -n "$_stopped_line" ]; then
+        last_stopped=$(echo "$_stopped_line" | awk '{print $1, $2, $3}')
+    fi
+
+    # Last error and exit code from log
+    last_error=""
+    last_exit_code="null"
+    _last_fail=$(echo "$_log" | grep 'Status.*FAIL' | tail -1)
+    if [ -n "$_last_fail" ]; then
+        _err=$(echo "$_last_fail" | grep -o '"error":"[^"]*"' | head -1 | cut -d: -f2- | tr -d '"')
+        [ -n "$_err" ] && last_error=$_err
+        _code=$(echo "$_last_fail" | grep -o '"exitCode":[0-9]*' | head -1 | cut -d: -f2)
+        [ -n "$_code" ] && last_exit_code="$_code"
+    fi
+
+    # Failure counts
+    failures=0
+    crash_failures=0
+    _fcount=$(echo "$_log" | grep -c '"failures":' 2>/dev/null || true)
+    _ccount=$(echo "$_log" | grep -c '"crashFailures":' 2>/dev/null || true)
+    _fcount=$(($_fcount + 0)) 2>/dev/null || _fcount=0
+    _ccount=$(($_ccount + 0)) 2>/dev/null || _ccount=0
+    failures=$_fcount
+    crash_failures=$_ccount
+
+    # DNS ping
+    dns_ping="unavailable"
+    _start=$(date +%s%N 2>/dev/null || echo 0)
+    if nc -z -w2 9.9.9.9 53 2>/dev/null; then
+        _end=$(date +%s%N 2>/dev/null || echo 0)
+        _elapsed=$(( (_end - _start) / 1000000 ))
+        [ "$_elapsed" -gt 0 ] 2>/dev/null && dns_ping="${_elapsed}ms" || dns_ping="<1ms"
+    fi
+
+    printf '{"running":%s,"is_client":%s,"provider":%s,"transport":"%s","uptime_seconds":%d,' "$running" "$is_client" "$provider" "$transport" "$uptime_seconds"
+    printf '"last_started":"%s","last_stopped":"%s",' "$last_started" "$last_stopped"
+    printf '"last_error":"%s","last_exit_code":%s,' "$(printf '%s' "$last_error" | sed 's/"/\\"/g')" "$last_exit_code"
+    printf '"failures":%d,"crash_failures":%d,"dns_ping":"%s"}\n' "$failures" "$crash_failures" "$dns_ping"
+}
+
+# ── get_env ──────────────────────────────────────────────────
+get_env() {
+    printf '{'
+    _first=1
+    while IFS='=' read -r k v || [ -n "$k" ]; do
+        [ -z "$k" ] && continue
+        echo "$k" | grep -q '^#' && continue
+        k=$(echo "$k" | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')
+        [ -z "$k" ] && continue
+        if [ "$_first" -eq 0 ]; then
+            printf ','
+        fi
+        _first=0
+        printf '"%s":"%s"' "$k" "$(echo "$v" | sed 's/"/\\"/g')"
+    done < "$ENV_FILE"
+    if [ "$_first" -eq 1 ]; then
+        printf '"error":"no env file"'
+    fi
+    printf '}\n'
+}
+
+_json_kv() {
+    local comma="$1" key="$2" val="$3"
+    [ "$comma" -eq 0 ] 2>/dev/null && [ "$comma" != "0" ] && comma=1
+    if [ "$comma" != "0" ] 2>/dev/null; then
+        # first=false, add comma
+        printf ','
+    fi
+    printf '"%s":"%s"' "$key" "$(echo "$val" | sed 's/"/\\"/g')"
+}
+
+# ── set_env ──────────────────────────────────────────────────
+set_env() {
+    _stdin=$(cat)
+    _restart=$(echo "$_stdin" | grep -o '"restart":[^,}]*' | cut -d: -f2 | tr -d ' ')
+    _env_json=$(echo "$_stdin" | grep -o '"env":{[^}]*}' || echo "{}")
+
+    # Parse env pairs from JSON
+    _pairs=$(echo "$_env_json" | sed 's/"env"://' | sed 's/^{//;s/}$//')
+    _tmp_env="/tmp/olcrtc-env-$$"
+    cp "$ENV_FILE" "$_tmp_env" 2>/dev/null || touch "$_tmp_env"
+
+    # Apply updates
+    IFS=','
+    for _pair in $_pairs; do
+        _key=$(echo "$_pair" | cut -d: -f1 | tr -d ' "')
+        _val=$(echo "$_pair" | cut -d: -f2- | sed 's/^ *"//;s/" *$//')
+        [ -z "$_key" ] && continue
+        if grep -q "^$_key=" "$_tmp_env" 2>/dev/null; then
+            sed -i "s|^$_key=.*|$_key=$_val|" "$_tmp_env"
+        else
+            echo "$_key=$_val" >> "$_tmp_env"
+        fi
+    done
+    cp "$_tmp_env" "$ENV_FILE"
+    rm -f "$_tmp_env"
+
+    # Restart if requested
+    if echo "$_restart" | grep -qi 'true'; then
+        /etc/init.d/dial-up restart 2>/dev/null || true
+    fi
+
+    printf '{"ok":true}\n'
+}
+
+# ── service_action ───────────────────────────────────────────
+service_action() {
+    _stdin=$(cat)
+    _action=$(echo "$_stdin" | grep -o '"action":"[^"]*"' | cut -d: -f2 | tr -d '"')
+    case "$_action" in
+        start|stop|restart|reload)
+            /etc/init.d/dial-up "$_action" 2>/dev/null || true
+            printf '{"ok":true}\n'
+            ;;
+        *)
+            printf '{"error":"invalid action: %s"}\n' "$_action"
+            ;;
+    esac
+}
+
+# ── get_singbox ──────────────────────────────────────────────
+# Primary: authoritative route from the Go status endpoint
+# (controller.Status.SingBoxRoute, parsed from Clash API "now" in Go).
+# Fallback: direct Clash API query, used when the bot is down but
+# sing-box keeps running as an independent init.d service.
+get_singbox() {
+    alive="false"
+    route="unknown"
+
+    # |>B:GoStatus
+    _resp=""
+    if command -v wget >/dev/null 2>&1; then
+        _resp=$(wget -q -O - --timeout=2 "http://127.0.0.1:${STATUS_PORT}/status" 2>/dev/null || true)
+    fi
+    if [ -z "$_resp" ] && command -v curl >/dev/null 2>&1; then
+        _resp=$(curl -s --max-time 2 "http://127.0.0.1:${STATUS_PORT}/status" 2>/dev/null || true)
+    fi
+    if [ -n "$_resp" ] && command -v jsonfilter >/dev/null 2>&1; then
+        _alive=$(jsonfilter -s "$_resp" -e '@.sing_box_alive' 2>/dev/null || echo "")
+        _route=$(jsonfilter -s "$_resp" -e '@.sing_box_route' 2>/dev/null || echo "")
+        [ "$_alive" = "true" ] && alive="true"
+        [ "$_alive" = "false" ] && alive="false"
+        [ -n "$_route" ] && route="$_route"
+    fi
+    # <|B:GoStatus
+
+    # |>B:ClashFallback
+    if [ "$route" = "unknown" ]; then
+        _resp=$(wget -q -O - --timeout=3 "http://127.0.0.1:9090/proxies/route-select" 2>/dev/null || \
+                curl -s --max-time 3 "http://127.0.0.1:9090/proxies/route-select" 2>/dev/null || true)
+        if [ -n "$_resp" ]; then
+            alive="true"
+            _r=$(echo "$_resp" | grep -o '"now":"[^"]*"' | head -1 | cut -d: -f2 | tr -d '"')
+            [ -n "$_r" ] && route="$_r"
+        fi
+    fi
+    # <|B:ClashFallback
+
+    # Read config
+    config="null"
+    if [ -f "/etc/sing-box/config.json" ]; then
+        config=$(cat "/etc/sing-box/config.json" 2>/dev/null | head -c 4096 || echo "null")
+    fi
+
+    printf '{"alive":%s,"route":"%s","config":%s}\n' "$alive" "$route" "$config"
+}
+
+# ── set_route ────────────────────────────────────────────────
+set_route() {
+    _stdin=$(cat)
+    _mode=$(echo "$_stdin" | grep -o '"mode":"[^"]*"' | cut -d: -f2 | tr -d '"')
+
+    case "$_mode" in
+        proxy|direct)
+            # PUT via wget (if available) or curl
+            _data="{\"name\":\"$_mode\"}"
+            if command -v curl >/dev/null 2>&1; then
+                curl -s -X PUT -d "$_data" \
+                    -H "Content-Type: application/json" \
+                    --max-time 3 "http://127.0.0.1:9090/proxies/route-select" \
+                    2>/dev/null || true
+            else
+                wget -q --post-data="$_data" \
+                    --header="Content-Type: application/json" \
+                    -O /dev/null "http://127.0.0.1:9090/proxies/route-select" \
+                    --method=PUT 2>/dev/null || true
+            fi
+            printf '{"ok":true}\n'
+            ;;
+        *)
+            printf '{"error":"invalid mode: %s"}\n' "$_mode"
+            ;;
+    esac
+}
+
+# ── get_firewall ─────────────────────────────────────────────
+get_firewall() {
+    nft_chain=""
+    [ -n "$(command -v nft)" ] && nft_chain=$(nft list chain inet fw4 singbox_tproxy 2>/dev/null || true)
+
+    fw4_include=""
+    fw4_include=$(uci -q get firewall.singbox_tproxy.path 2>/dev/null || true)
+
+    ip_rule="absent"
+    ip rule show 2>/dev/null | grep -q "fwmark 0x1" && ip_rule="present"
+
+    ip_route="absent"
+    ip route show table 100 2>/dev/null | grep -q "local" && ip_route="present"
+
+    listening="false"
+    netstat -ltn 2>/dev/null | grep -q ":2080 " && listening="true"
+
+    conntrack_count=0
+    conntrack_lines="[]"
+    if command -v conntrack >/dev/null 2>&1; then
+        _cc=$(conntrack -C 2>/dev/null || echo 0)
+        conntrack_count=$_cc
+        _lines=$(conntrack -L -p tcp --dport 2080 2>/dev/null | head -30 || true)
+        if [ -n "$_lines" ]; then
+            conntrack_lines=$(printf '%s\n' "$_lines" | sed 's/\\/\\\\/g; s/"/\\"/g' | awk '{printf "\"%s\",", $0}' | sed 's/,$//')
+            conntrack_lines="[$conntrack_lines]"
+        fi
+    fi
+
+    # UCI policy routing info
+    uci_tproxy_rule_mark=$(uci -q get network.tproxy_rule.mark 2>/dev/null || echo "")
+    uci_tproxy_rule_lookup=$(uci -q get network.tproxy_rule.lookup 2>/dev/null || echo "")
+    uci_tproxy_local_iface=$(uci -q get network.tproxy_local.interface 2>/dev/null || echo "")
+    uci_tproxy_local_target=$(uci -q get network.tproxy_local.target 2>/dev/null || echo "")
+    uci_tproxy_local_table=$(uci -q get network.tproxy_local.table 2>/dev/null || echo "")
+    uci_tproxy_local_type=$(uci -q get network.tproxy_local.type 2>/dev/null || echo "")
+
+    # Escape nft_chain for JSON
+    nft_chain_esc=$(printf '%s' "$nft_chain" | sed 's/\\/\\\\/g; s/"/\\"/g' | awk '{printf "%s\\n", $0}' | tr -d '\n')
+
+    printf '{"nft_chain":"%s","fw4_include":"%s","ip_rule":"%s","ip_route":"%s","listening":%s,"conntrack_count":%d,"conntrack_lines":%s,' \
+        "$nft_chain_esc" "$fw4_include" "$ip_rule" "$ip_route" "$listening" "$conntrack_count" "$conntrack_lines"
+    printf '"uci_tproxy_rule":{"mark":"%s","lookup":"%s"},' "$uci_tproxy_rule_mark" "$uci_tproxy_rule_lookup"
+    printf '"uci_tproxy_local":{"interface":"%s","target":"%s","table":"%s","type":"%s"}}\n' \
+        "$uci_tproxy_local_iface" "$uci_tproxy_local_target" "$uci_tproxy_local_table" "$uci_tproxy_local_type"
+}
+
+# ── get_logs ─────────────────────────────────────────────────
+get_logs() {
+    _stdin=$(cat)
+    _source=$(echo "$_stdin" | grep -o '"source":"[^"]*"' | cut -d: -f2 | tr -d '"')
+    _lines=$(echo "$_stdin" | grep -o '"lines":[0-9]*' | cut -d: -f2)
+    _filter=$(echo "$_stdin" | grep -o '"filter":"[^"]*"' | cut -d: -f2 | tr -d '"')
+
+    [ -z "$_lines" ] && _lines=100
+    [ "$_lines" -gt 1000 ] 2>/dev/null && _lines=1000
+
+    _log_arg=""
+    case "$_source" in
+        dial-up) _log_arg="-e dial-up" ;;
+        olcrtc)        _log_arg="-e 'olcRTC:'" ;;
+        sing-box)      _log_arg="-e sing-box" ;;
+        *)             _log_arg="" ;;
+    esac
+
+    _output=$(eval logread $_log_arg -l "$_lines" 2>/dev/null | tail -"$_lines" || true)
+    if [ -n "$_filter" ]; then
+        _output=$(echo "$_output" | grep -i "$_filter" || true)
+    fi
+
+    # Build JSON array — avoid pipe to prevent subshell variable scope issues
+    _json_lines=""
+    _first=1
+    _IFS_SAVE="$IFS"
+    IFS='
+'
+    for _line in $_output; do
+        [ -z "$_line" ] && continue
+        _escaped=$(printf '%s' "$_line" | sed 's/\\/\\\\/g; s/"/\\"/g')
+        if [ "$_first" -eq 1 ]; then
+            _json_lines="\"$_escaped\""
+            _first=0
+        else
+            _json_lines="$_json_lines,\"$_escaped\""
+        fi
+    done
+    IFS="$_IFS_SAVE"
+    printf '{"lines":[%s]}\n' "$_json_lines"
+}
+
+# ── ping_dns ─────────────────────────────────────────────────
+ping_dns() {
+    _start=$(date +%s%N 2>/dev/null || echo 0)
+    if nc -z -w2 9.9.9.9 53 2>/dev/null; then
+        _end=$(date +%s%N 2>/dev/null || echo 0)
+        _elapsed=$(( (_end - _start) / 1000000 ))
+        printf '{"rtt_ms":%d}\n' "$_elapsed"
+    else
+        printf '{"error":"timeout"}\n'
+    fi
+}
+
+# ── ping_tunnel ──────────────────────────────────────────────
+# Measures RTT through the olcRTC tunnel via the Clash API delay-test
+# endpoint (GET /proxies/proxy/delay). sing-box routes an HTTP request
+# through the "proxy" outbound (→ olcRTC SOCKS5 on 127.0.0.1:1080)
+# and returns {"delay":<ms>}.
+#
+# Uses raw HTTP over nc to bypass busybox wget's URL-encoding issues
+# with query parameters. Falls back to wget/curl if nc is unavailable.
+# On failure, surfaces the raw Clash API response for diagnosis.
+ping_tunnel() {
+    _path='/proxies/proxy/delay?url=http%3A%2F%2Fcp.cloudflare.com&timeout=5000'
+
+    # |>B:ClashDelayTest
+    _resp=""
+    if command -v nc >/dev/null 2>&1; then
+        _resp=$({ printf 'GET %s HTTP/1.0\r\nHost: 127.0.0.1\r\nConnection: close\r\n\r\n' "$_path"; sleep 6; } | nc 127.0.0.1 9090 2>/dev/null) || _resp=""
+        # Strip HTTP headers — keep only the body (last non-empty line that looks like JSON)
+        _resp=$(echo "$_resp" | grep '^{.*}$' | tail -1)
+    fi
+    if [ -z "$_resp" ]; then
+        _resp=$(wget -q -O - --timeout=8 "http://127.0.0.1:9090${_path}" 2>/dev/null) || _resp=""
+    fi
+    if [ -z "$_resp" ] && command -v curl >/dev/null 2>&1; then
+        _resp=$(curl -s --max-time 8 "http://127.0.0.1:9090${_path}" 2>/dev/null) || _resp=""
+    fi
+
+    if [ -n "$_resp" ]; then
+        _delay=$(echo "$_resp" | grep -o '"delay" *: *[0-9]*' | grep -o '[0-9]*$')
+        if [ -n "$_delay" ] && [ "$_delay" -gt 0 ] 2>/dev/null; then
+            printf '{"rtt_ms":%d}\n' "$_delay"
+            return
+        fi
+        # sing-box responded but no valid delay — include raw response for diagnosis
+        _esc=$(printf '%s' "$_resp" | sed 's/"/\\"/g')
+        printf '{"error":"delay test failed: %s"}\n' "$_esc"
+        return
+    fi
+    # <|B:ClashDelayTest
+
+    printf '{"error":"tunnel unreachable"}\n'
+}
+
+# ── get_whitelist ────────────────────────────────────────────
+get_whitelist() {
+    if [ -f "/etc/sing-box/whitelist.json" ]; then
+        cat "/etc/sing-box/whitelist.json" 2>/dev/null || printf '{"domains":[],"count":0}\n'
+    else
+        printf '{"domains":[],"count":0}\n'
+    fi
+}
+
+# ── set_whitelist ────────────────────────────────────────────
+set_whitelist() {
+    _stdin=$(cat)
+    _domains=$(echo "$_stdin" | grep -o '"domains":\[[^]]*\]' | sed 's/"domains"://')
+
+    # Build new whitelist JSON preserving version and rules structure
+    _version=$(cat /etc/sing-box/whitelist.json 2>/dev/null | grep -o '"version":[0-9]*' | cut -d: -f2)
+    [ -z "$_version" ] && _version=1
+
+    cat > /etc/sing-box/whitelist.json <<WHITELISTEOF
+{"version":$_version,"rules":[{"domain_suffix":$_domains}]}
+WHITELISTEOF
+
+    printf '{"ok":true}\n'
+}
+
+# ── set_provider ─────────────────────────────────────────────
+set_provider() {
+    _stdin=$(cat)
+    _url=$(echo "$_stdin" | grep -o '"url":"[^"]*"' | cut -d: -f2- | tr -d '"')
+
+    kind=""
+    room_id=""
+
+    # wbstream URL
+    _match=$(echo "$_url" | grep -o '^https://stream\.wb\.ru/room/\([0-9a-f-]\{36\}\)' || true)
+    if [ -n "$_match" ]; then
+        kind="wbstream"
+        room_id=$(echo "$_url" | sed 's|^https://stream\.wb\.ru/room/||' | cut -d/ -f1 | cut -d? -f1)
+    fi
+
+    # wbstream protocol
+    if [ -z "$kind" ]; then
+        _match=$(echo "$_url" | grep -o '^wbstream://\([0-9a-f-]\{36\}\)' || true)
+        if [ -n "$_match" ]; then
+            kind="wbstream"
+            room_id=$(echo "$_url" | sed 's|^wbstream://||' | cut -d/ -f1 | cut -d? -f1)
+        fi
+    fi
+
+    # Telemost URL
+    if [ -z "$kind" ]; then
+        _match=$(echo "$_url" | grep -o '^https://telemost\.\(360\.\)\?yandex\.ru/j/[0-9]\+' || true)
+        if [ -n "$_match" ]; then
+            kind="telemost"
+            room_id=$(echo "$_url" | sed 's|.*/j/||' | cut -d/ -f1 | cut -d? -f1)
+        fi
+    fi
+
+    if [ -z "$kind" ]; then
+        printf '{"error":"Unsupported URL format"}\n'
+        return
+    fi
+
+    printf '["%s","%s"]\n' "$kind" "$room_id" > "$LAST_PROVIDER_FILE"
+    /etc/init.d/dial-up restart 2>/dev/null || true
+    printf '{"ok":true,"provider":{"kind":"%s","room_id":"%s"}}\n' "$kind" "$room_id"
+}
+
+# ── clear_provider ───────────────────────────────────────────
+clear_provider() {
+    rm -f "$LAST_PROVIDER_FILE"
+    /etc/init.d/dial-up restart 2>/dev/null || true
+    printf '{"ok":true}\n'
+}
+
+# ── generate_key ─────────────────────────────────────────────
+generate_key() {
+    _key=$(openssl rand -hex 32 2>/dev/null || head -c 64 < /dev/urandom | od -An -tx1 | tr -d ' \n')
+    printf '{"key":"%s"}\n' "$_key"
+}
+
+# ── test_socks_proxy ──────────────────────────────────────────
+# TCP-connect reachability test for an upstream SOCKS5 proxy.
+# Measures RTT via nc -z -w3 (port-open probe only; full SOCKS5
+# handshake is out of scope / future). Params (stdin JSON): addr, port.
+# Returns {"reachable":true,"rtt_ms":N} or {"reachable":false,"error":"..."}.
+test_socks_proxy() {
+    _stdin=$(cat)
+    _addr=$(echo "$_stdin" | grep -o '"addr":"[^"]*"' | cut -d: -f2- | tr -d '"')
+    _port=$(echo "$_stdin" | grep -o '"port":"[^"]*"' | cut -d: -f2- | tr -d '"')
+
+    if [ -z "$_addr" ] || [ -z "$_port" ]; then
+        printf '{"reachable":false,"error":"addr and port required"}\n'
+        return
+    fi
+
+    if ! command -v nc >/dev/null 2>&1; then
+        printf '{"reachable":false,"error":"nc not installed"}\n'
+        return
+    fi
+
+    _start=$(date +%s%N 2>/dev/null || echo 0)
+    if nc -z -w3 "$_addr" "$_port" 2>/dev/null; then
+        _end=$(date +%s%N 2>/dev/null || echo 0)
+        _rtt=$(( (_end - _start) / 1000000 ))
+        [ "$_rtt" -gt 0 ] 2>/dev/null || _rtt=0
+        printf '{"reachable":true,"rtt_ms":%d}\n' "$_rtt"
+    else
+        printf '{"reachable":false,"error":"connection refused or timeout"}\n'
+    fi
+}
+
+# ══════════════════════════════════════════════════════════════
+# Entry point: rpcd calls this script as: olcrtc-bot call <method>
+# Stdin contains JSON params. Output is JSON to stdout.
+# ══════════════════════════════════════════════════════════════
+
+case "${1:-list}" in
+    list) list ;;
+    call) call "$2" ;;
+    *)    printf '{"error":"unknown command: %s"}\n' "$1" ;;
+esac

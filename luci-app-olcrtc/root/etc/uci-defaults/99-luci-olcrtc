@@ -1,0 +1,8 @@
+#!/bin/sh
+# First-boot: restart rpcd to pick up olcrtc-bot backend and ACL
+
+/usr/libexec/rpcd/olcrtc-bot list >/dev/null 2>&1 || true
+
+/etc/init.d/rpcd restart 2>/dev/null || true
+
+exit 0

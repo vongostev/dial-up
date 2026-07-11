@@ -1,0 +1,363 @@
+msgid ""
+msgstr ""
+"Project-Id-Version: luci-app-olcrtc\n"
+"Content-Type: text/plain; charset=UTF-8\n"
+"Content-Transfer-Encoding: 8bit\n"
+"Language: ru\n"
+
+msgid "dial-up!"
+msgstr "dial-up!"
+
+msgid "Tunnel"
+msgstr "Туннель"
+
+msgid "Bot VK"
+msgstr "Бот ВК"
+
+msgid "Network"
+msgstr "Сеть"
+
+msgid "Logs"
+msgstr "Логи"
+
+msgid "Orchestrator"
+msgstr "Оркестратор"
+
+msgid "Tunnel"
+msgstr "Туннель"
+
+msgid "LAN Route"
+msgstr "Маршрут LAN"
+
+msgid "Online"
+msgstr "В сети"
+
+msgid "Offline"
+msgstr "Не в сети"
+
+msgid "Stable"
+msgstr "Стабилен"
+
+msgid "Down"
+msgstr "Упал"
+
+msgid "PROXY"
+msgstr "ПРОКСИ"
+
+msgid "DIRECT"
+msgstr "НАПРЯМУЮ"
+
+msgid "Global Mode"
+msgstr "Глобальный режим"
+
+msgid "Client"
+msgstr "Клиент"
+
+msgid "Server"
+msgstr "Сервер"
+
+msgid "Changing role requires a full service restart."
+msgstr "Смена роли требует полного перезапуска сервиса."
+
+msgid "VK Bot Configuration (/etc/dial-up.env)"
+msgstr "Конфигурация VK-бота (/etc/dial-up.env)"
+
+msgid "Save & Restart Bot"
+msgstr "Сохранить и перезапустить оркестратор"
+
+msgid "Advanced Settings (Backoff & Paths)"
+msgstr "Расширенные настройки (backoff и пути)"
+
+msgid "Comma-separated VK user IDs (empty = allow all)"
+msgstr "ID пользователей VK через запятую (пусто = разрешить всем)"
+
+msgid "sec"
+msgstr "сек"
+
+msgid "Local status endpoint port (loopback). Default 9091."
+msgstr "Порт локального status-эндпоинта (loopback). По умолчанию 9091."
+
+msgid "Environment saved"
+msgstr "Окружение сохранено"
+
+msgid "service restarted"
+msgstr "сервис перезапущен"
+
+msgid "Connection Setup"
+msgstr "Настройка подключения"
+
+msgid "Provider URL"
+msgstr "URL провайдера"
+
+msgid "Please enter a URL"
+msgstr "Пожалуйста, введите URL"
+
+msgid "Error:"
+msgstr "Ошибка:"
+
+msgid "Provider set successfully"
+msgstr "Провайдер успешно установлен"
+
+msgid "Stop tunnel and clear provider?"
+msgstr "Остановить туннель и очистить провайдера?"
+
+msgid "Stop & Clear"
+msgstr "Стоп и очистка"
+
+msgid "Provider cleared, service stopped"
+msgstr "Провайдер очищен, сервис остановлен"
+
+msgid "Service"
+msgstr "Сервис"
+
+msgid "executed"
+msgstr "выполнено"
+
+msgid "Force Restart"
+msgstr "Принудительный перезапуск"
+
+msgid "Process Status"
+msgstr "Статус процесса"
+
+msgid "Running"
+msgstr "Работает"
+
+msgid "Stable > 30s"
+msgstr "Стабилен > 30с"
+
+msgid "Stopped"
+msgstr "Остановлен"
+
+msgid "Current Provider"
+msgstr "Текущий провайдер"
+
+msgid "Active Transport"
+msgstr "Активный транспорт"
+
+msgid "Tunnel Metrics & Health (Live)"
+msgstr "Метрики и здоровье туннеля (в реальном времени)"
+
+msgid "Uptime"
+msgstr "Время работы"
+
+msgid "Tunnel RTT"
+msgstr "RTT туннеля"
+
+msgid "Measure RTT"
+msgstr "Измерить RTT"
+
+msgid "measuring..."
+msgstr "измерение..."
+
+msgid "DNS Ping (9.9.9.9)"
+msgstr "DNS Ping (9.9.9.9)"
+
+msgid "Backoff / Fails"
+msgstr "Backoff / сбои"
+
+msgid "(max %d)"
+msgstr "(макс %d)"
+
+msgid "Metrics"
+msgstr "Метрики"
+
+msgid "Diagnostics"
+msgstr "Диагностика"
+
+msgid "Last Exit Code"
+msgstr "Код выхода"
+
+msgid "Last Error"
+msgstr "Последняя ошибка"
+
+msgid "none"
+msgstr "нет"
+
+msgid "If the tunnel crashes, the exact error captured from the subprocess pipe is shown here."
+msgstr "Если туннель падает, здесь отображается точная ошибка, перехваченная из пайпа подпроцесса."
+
+msgid "Cryptography"
+msgstr "Криптография"
+
+msgid "Generate New Key"
+msgstr "Сгенерировать новый ключ"
+
+msgid "Save Key & Restart"
+msgstr "Сохранить ключ и перезапустить"
+
+msgid "OLCRTC_KEY saved, service restarted"
+msgstr "OLCRTC_KEY сохранён, сервис перезапущен"
+
+msgid "Saving the key restarts dial-up."
+msgstr "Сохранение ключа перезапускает dial-up."
+
+msgid "Network management is only available in client mode."
+msgstr "Управление сетью доступно только в режиме клиента."
+
+msgid "\"IS_CLIENT\" must be set to \"true\" in the Bot settings."
+msgstr "\"IS_CLIENT\" должно быть \"true\" в настройках бота."
+
+msgid "Routing"
+msgstr "Маршрутизация"
+
+msgid "Route Engine (Sniffing)"
+msgstr "Маршрутизатор (сниффинг)"
+
+msgid "MATCH: .local, .lan"
+msgstr "СОВПАДЕНИЕ: .local, .lan"
+
+msgid "DIRECT"
+msgstr "НАПРЯМУЮ"
+
+msgid "MATCH: whitelist.json"
+msgstr "СОВПАДЕНИЕ: whitelist.json"
+
+msgid "All other (MISMATCH)"
+msgstr "Остальное (НЕСОВПАДЕНИЕ)"
+
+msgid "Selector: route-select"
+msgstr "Селектор: route-select"
+
+msgid "Outbound: PROXY"
+msgstr "Исходящий: ПРОКСИ"
+
+msgid "Outbound: DIRECT"
+msgstr "Исходящий: НАПРЯМУЮ"
+
+msgid "Active path: PROXY through olcRTC."
+msgstr "Активный путь: ПРОКСИ через olcRTC."
+
+msgid "Active path: DIRECT to ISP."
+msgstr "Активный путь: НАПРЯМУЮ к провайдеру."
+
+msgid "Route selector state unknown."
+msgstr "Состояние селектора маршрута неизвестно."
+
+msgid "Whitelist RU (Bypass)"
+msgstr "Белый список (идёт напрямую)"
+
+msgid "Search"
+msgstr "Поиск"
+
+msgid "Total"
+msgstr "Всего"
+
+msgid "domains"
+msgstr "доменов"
+
+msgid "showing"
+msgstr "показано"
+
+msgid "matches"
+msgstr "совпадений"
+
+msgid "No domains match your search."
+msgstr "Нет доменов, соответствующих поиску."
+
+msgid "Whitelist is empty."
+msgstr "Белый список пуст."
+
+msgid "Add domain"
+msgstr "Добавить домен"
+
+msgid "Domain already exists"
+msgstr "Домен уже существует"
+
+msgid "+ Add"
+msgstr "+ Добавить"
+
+msgid "Save & Reload Sing-box"
+msgstr "Сохранить и перезагрузить Sing-box"
+
+msgid "Whitelist saved"
+msgstr "Белый список сохранён"
+
+msgid "Manual Routing Override"
+msgstr "Ручное переопределение маршрута"
+
+msgid "Auto (Bot)"
+msgstr "Авто (бот)"
+
+msgid "Direct"
+msgstr "Напрямую"
+
+msgid "Proxy"
+msgstr "Прокси"
+
+msgid "Direct/Proxy apply immediately via the sing-box selector; Auto is cosmetic — the bot still auto-promotes proxy when stable."
+msgstr "Напрямую/Прокси применяются немедленно через селектор sing-box; Авто — косметика, бот всё равно повышает до прокси при стабилизации."
+
+msgid "Route switched to"
+msgstr "Маршрут переключен на"
+
+msgid "Diagnostics (collapsed)"
+msgstr "Диагностика (свёрнуто)"
+
+msgid "Active"
+msgstr "Активен"
+
+msgid "rules"
+msgstr "правил"
+
+msgid "Inactive"
+msgstr "Неактивен"
+
+msgid "Present"
+msgstr "Присутствует"
+
+msgid "Absent"
+msgstr "Отсутствует"
+
+msgid "Listening"
+msgstr "Слушает"
+
+msgid "Not listening"
+msgstr "Не слушает"
+
+msgid "Conntrack"
+msgstr "Conntrack"
+
+msgid "Use Service → Reload on the System page if these checks fail."
+msgstr "Если проверки не проходят, используйте Сервис → Перезагрузить на странице Система."
+
+msgid "Bot controls the route automatically (auto-promotes proxy on stable > 30s)."
+msgstr "Бот управляет маршрутом автоматически (повышает до прокси при стабильности > 30с)."
+
+msgid "All Services"
+msgstr "Все сервисы"
+
+msgid "Bot Only"
+msgstr "Только бот"
+
+msgid "Core (Tunnel)"
+msgstr "Ядро (туннель)"
+
+msgid "Sing-box"
+msgstr "Sing-box"
+
+msgid "Source"
+msgstr "Источник"
+
+msgid "Lines"
+msgstr "Строки"
+
+msgid "Auto-refresh"
+msgstr "Автообновление"
+
+msgid "Off"
+msgstr "Выкл"
+
+msgid "Refresh"
+msgstr "Обновить"
+
+msgid "Clear Logs"
+msgstr "Очистить логи"
+
+msgid "Download"
+msgstr "Скачать"
+
+msgid "Error fetching logs:"
+msgstr "Ошибка получения логов:"
+
+msgid "Log view cleared (logs on the server are unchanged)."
+msgstr "Просмотр логов очищен (логи на сервере не изменены)."
