@@ -1,4 +1,5 @@
 /*
+[2026-07-12] :: 🚀 :: Added TestNetCacheRTTPropagation and TestNetCacheRTTDeadSb — verify DelayTest RTT propagates into Status.TunnelRTTMs and dead sb skips the call
 [2026-07-10] :: 🛡️ :: Updated tests for async boot, added TestNetCacheStopTerminatesGoroutine and TestSetRouteRefreshesCache
 [2026-07-10] :: 🚀 :: Initial netCache test suite
 */
@@ -19,9 +20,12 @@ import (
 
 // slowFakeSingBox implements singbox.Controller with a configurable delay on Status().
 type slowFakeSingBox struct {
-	delay  time.Duration
-	status singbox.Status
-	calls  atomic.Int64
+	delay    time.Duration
+	status   singbox.Status
+	calls    atomic.Int64
+	rtt      int
+	rttErr   error
+	rttCalls atomic.Int64
 }
 
 func (s *slowFakeSingBox) SetRoute(_ string) error { return nil }
@@ -32,6 +36,11 @@ func (s *slowFakeSingBox) Status() (singbox.Status, error) {
 		time.Sleep(s.delay)
 	}
 	return s.status, nil
+}
+
+func (s *slowFakeSingBox) DelayTest() (int, error) {
+	s.rttCalls.Add(1)
+	return s.rtt, s.rttErr
 }
 
 // pollStatus waits for a condition on controller.Status to become true, with a timeout.
@@ -280,4 +289,57 @@ func TestSetRouteRefreshesCache(t *testing.T) {
 	} else {
 		t.Logf("SetRoute triggered refresh confirmed, sb.calls=%d", sb.calls.Load())
 	}
+}
+
+func TestNetCacheRTTPropagation(t *testing.T) {
+	l := logger.New(true)
+	sb := &slowFakeSingBox{
+		status: singbox.Status{Alive: true, Route: singbox.ModeProxy},
+		rtt:    42,
+	}
+
+	cfg := &config.Config{IsClient: true, SleepOnError: 1}
+	ctrl := controller.New(cfg, l, sb)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	ctrl.Start(ctx)
+
+	s := pollStatus(t, ctrl, 5*time.Second, func(s controller.Status) bool {
+		return s.TunnelRTTMs != nil
+	})
+
+	if *s.TunnelRTTMs != 42 {
+		t.Errorf("TunnelRTTMs = %d, want 42", *s.TunnelRTTMs)
+	}
+	if sb.rttCalls.Load() < 1 {
+		t.Errorf("expected at least 1 DelayTest call, got %d", sb.rttCalls.Load())
+	}
+	t.Logf("TunnelRTTMs=%d, rttCalls=%d", *s.TunnelRTTMs, sb.rttCalls.Load())
+}
+
+func TestNetCacheRTTDeadSb(t *testing.T) {
+	l := logger.New(true)
+	sb := &slowFakeSingBox{
+		status: singbox.Status{Alive: false},
+	}
+
+	cfg := &config.Config{IsClient: true, SleepOnError: 1}
+	ctrl := controller.New(cfg, l, sb)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	ctrl.Start(ctx)
+
+	s := pollStatus(t, ctrl, 5*time.Second, func(s controller.Status) bool {
+		return s.PingDNS != ""
+	})
+
+	if s.TunnelRTTMs != nil {
+		t.Errorf("expected nil TunnelRTTMs when sing-box is dead, got %d", *s.TunnelRTTMs)
+	}
+	if sb.rttCalls.Load() != 0 {
+		t.Errorf("expected 0 DelayTest calls when sb is dead, got %d", sb.rttCalls.Load())
+	}
+	t.Logf("TunnelRTTMs=%v, rttCalls=%d", s.TunnelRTTMs, sb.rttCalls.Load())
 }

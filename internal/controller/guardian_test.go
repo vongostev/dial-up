@@ -57,6 +57,8 @@ func (f *fakeSB) SetRoute(mode string) error {
 	return nil
 }
 
+func (f *fakeSB) DelayTest() (int, error) { return 0, nil }
+
 func TestGuardianAliveDirectNoOp(t *testing.T) {
 	l := logger.New(true)
 	sb := &fakeSB{alive: true, route: singbox.ModeDirect}

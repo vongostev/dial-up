@@ -103,7 +103,7 @@ return view.extend({
 		var sourceDefs = [
 			{value: 'all', label: _('All Services')},
 			{value: 'bot', label: _('Bot Only')},
-			{value: 'core', label: _('Core (Tunnel)')},
+			{value: 'core', label: _('OlcRTC')},
 			{value: 'singbox', label: _('Sing-box')}
 		];
 		var radios = sourceDefs.map(function (src) {

@@ -24,16 +24,36 @@ function describe(status, singbox, env) {
 	singbox = singbox || {};
 	env = env || {};
 	var isClient = status.is_client === true;
+	var rttMs = status.tunnel_rtt_ms;
 
-	// Orchestrator State
-	var orchOk = !!status.running;
-	var orchType = orchOk ? 'ok' : 'bad';
-	var orchText = orchOk ? _('Online') : _('Offline');
+	// Bot State
+	var botOk = !!status.vk_alive;
+	var botType = botOk ? 'ok' : 'bad';
+	var botText = botOk ? _('Online') : _('Offline');
 
-	// Tunnel State
-	var tunnelOk = !!status.running;
-	var tunnelType = tunnelOk ? 'ok' : 'bad';
-	var tunnelText = tunnelOk ? _('Stable') : _('Down');
+	// Tunnel State — client uses RTT as authoritative; server uses process running
+	var tunnelType, tunnelText;
+
+	if (isClient && rttMs != null) {
+		if (rttMs < 1000) {
+			tunnelType = 'ok';
+			tunnelText = _('Stable') + ' (RTT ' + rttMs + 'ms)';
+		} else {
+			tunnelType = 'warning';
+			tunnelText = _('Unstable') + ' (RTT ' + rttMs + 'ms)';
+		}
+	} else if (isClient && !!status.running) {
+		tunnelType = 'warning';
+		tunnelText = _('Degraded');
+	} else if (isClient) {
+		tunnelType = 'bad';
+		tunnelText = _('Down');
+	} else {
+		var tunnelOk = !!status.running;
+
+		tunnelType = tunnelOk ? 'ok' : 'bad';
+		tunnelText = tunnelOk ? _('Up') : _('Down');
+	}
 
 	// 3rd card: client → LAN Route; server → EGRESS
 	var routeText, routeType, routeIcon;
@@ -67,7 +87,7 @@ function describe(status, singbox, env) {
 	}
 
 	return {
-		orch: { text: orchText, type: orchType },
+		bot: { text: botText, type: botType },
 		tunnel: { text: tunnelText, type: tunnelType },
 		route: { text: routeText, type: routeType, icon: routeIcon, label: isClient ? _('LAN Route') : _('Egress') }
 	};
@@ -93,7 +113,7 @@ function renderStatusStrip(status, singbox, env) {
 		'class': 'olcrtc-status-panel',
 		'style': 'display: flex; flex-wrap: wrap; gap: 16px; margin-bottom: 24px;'
 	}, [
-		makeCard('\ud83e\udd16', _('Orchestrator'), s.orch),
+		makeCard('\ud83e\udd16', _('Bot'), s.bot),
 		makeCard('\ud83d\ude87', _('Tunnel'), s.tunnel),
 		makeCard(s.route.icon, s.route.label, s.route)
 	]);
@@ -107,6 +127,7 @@ return baseclass.extend({
 		if (!document.getElementById('olcrtc-modern-styles')) {
 			var style = E('style', { 'id': 'olcrtc-modern-styles' }, [
 				'@keyframes olcrtc-pulse { 0% { box-shadow: 0 0 0 0 rgba(67, 160, 71, 0.4); } 70% { box-shadow: 0 0 0 8px rgba(67, 160, 71, 0); } 100% { box-shadow: 0 0 0 0 rgba(67, 160, 71, 0); } }',
+				'@keyframes olcrtc-pulse-warning { 0% { box-shadow: 0 0 0 0 rgba(253, 216, 53, 0.5); } 70% { box-shadow: 0 0 0 8px rgba(253, 216, 53, 0); } 100% { box-shadow: 0 0 0 0 rgba(253, 216, 53, 0); } }',
 				'.olcrtc-metric-card { display: flex; align-items: center; gap: 14px; padding: 14px 20px; background: rgba(128,128,128,0.06); border: 1px solid rgba(128,128,128,0.12); border-radius: 12px; flex: 1; min-width: 220px; box-shadow: 0 2px 8px rgba(0,0,0,0.04); transition: transform 0.2s, background 0.2s; }',
 				'.olcrtc-metric-card:hover { background: rgba(128,128,128,0.09); transform: translateY(-1px); }',
 				'.olcrtc-icon-wrap { display: flex; align-items: center; justify-content: center; width: 46px; height: 46px; border-radius: 12px; font-size: 1.6em; background: rgba(128,128,128,0.08); border: 1px solid rgba(128,128,128,0.05); }',
@@ -117,6 +138,7 @@ return baseclass.extend({
 				'.olcrtc-dot.ok { background: #43a047; animation: olcrtc-pulse 2s infinite; }',
 				'.olcrtc-dot.bad { background: #e53935; }',
 				'.olcrtc-dot.neutral { background: #1e88e5; }',
+				'.olcrtc-dot.warning { background: #fdd835; animation: olcrtc-pulse-warning 2s infinite; }',
 				'.olcrtc-value { font-size: 1.15em; font-weight: 600; }'
 			].join('\n'));
 			document.head.appendChild(style);
@@ -135,7 +157,9 @@ return baseclass.extend({
 
 	refresh: function () {
 		var self = this;
-		return Promise.all([callStatus(), callGetSingbox(), callGetEnv()]).then(function (res) {
+		var calls = [callStatus(), callGetSingbox(), callGetEnv()];
+
+		return Promise.all(calls).then(function (res) {
 			if (self.node && self.node.parentNode) {
 				var fresh = renderStatusStrip(res[0], res[1], res[2]);
 				self.node.parentNode.replaceChild(fresh, self.node);

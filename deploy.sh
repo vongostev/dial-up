@@ -48,6 +48,28 @@ warn()  { printf "${YELLOW}[!!]${NC} %s\n" "$*"; }
 error() { printf "${RED}[ERR]${NC} %s\n" "$*"; exit 1; }
 log() { printf '[..] %s\n' "$*"; }
 
+# ── Helper: portable hash ──────────────────────────────────
+# Returns MD5 hex digest of a file, or empty string on failure.
+hash_file() {
+    if command -v md5 >/dev/null 2>&1; then
+        md5 -q "$1" 2>/dev/null
+    elif command -v md5sum >/dev/null 2>&1; then
+        md5sum "$1" 2>/dev/null | cut -d' ' -f1
+    else
+        echo ""
+    fi
+}
+
+# ── Helper: skip copy if remote file has the same hash ─────
+# Returns 0 (skip) or 1 (copy needed).
+skip_copy() {
+    local local_hash remote_hash
+    local_hash=$(hash_file "$1") || return 1
+    [ -n "$local_hash" ] || return 1
+    remote_hash=$(ssh $SSH_OPTS "$HOST" "md5sum $2 2>/dev/null" | cut -d' ' -f1) || return 1
+    [ "$local_hash" = "$remote_hash" ]
+}
+
 echo ""
 echo "╔══════════════════════════════════════╗"
 echo "║   Deploy dial-up!                    ║"
@@ -96,9 +118,13 @@ ssh $SSH_OPTS "$HOST" "$ROUTER_INIT stop 2>/dev/null && while $ROUTER_INIT runni
 
 # ── Deploy binary ──────────────────────────────────────────
 BIN_SIZE=$(stat -f%z "$BINARY" 2>/dev/null || stat -c%s "$BINARY" 2>/dev/null || echo "?")
-log "Copying binary ($((BIN_SIZE / 1024)) KB)..."
-cat "$BINARY" | ssh $SSH_OPTS "$HOST" "cat > $ROUTER_BIN && chmod 755 $ROUTER_BIN"
-info "Binary $ROUTER_BIN ($(ssh $SSH_OPTS "$HOST" "ls -lh $ROUTER_BIN" | awk '{print $5}'))"
+if skip_copy "$BINARY" "$ROUTER_BIN"; then
+    info "Binary $ROUTER_BIN (unchanged, skipped)"
+else
+    log "Copying binary ($((BIN_SIZE / 1024)) KB)..."
+    cat "$BINARY" | ssh $SSH_OPTS "$HOST" "cat > $ROUTER_BIN && chmod 755 $ROUTER_BIN"
+    info "Binary $ROUTER_BIN ($(ssh $SSH_OPTS "$HOST" "ls -lh $ROUTER_BIN" | awk '{print $5}'))"
+fi
 
 # ── Deploy init script ─────────────────────────────────────
 log "Copying init script..."
@@ -111,9 +137,13 @@ warn "Killing any running olcrtc processes..."
 ssh $SSH_OPTS "$HOST" "killall $ROUTER_OLCRTC 2>/dev/null; while pgrep $ROUTER_OLCRTC >/dev/null 2>&1; do sleep 1; done" || true
 
 OLCRTC_SIZE=$(stat -f%z "$OLCRTC_BINARY" 2>/dev/null || stat -c%s "$OLCRTC_BINARY" 2>/dev/null || echo "?")
-log "Copying olcrtc binary ($((OLCRTC_SIZE / 1024)) KB)..."
-cat "$OLCRTC_BINARY" | ssh $SSH_OPTS "$HOST" "cat > $ROUTER_OLCRTC && chmod 755 $ROUTER_OLCRTC"
-info "olcrtc $ROUTER_OLCRTC ($(ssh $SSH_OPTS "$HOST" "ls -lh $ROUTER_OLCRTC" | awk '{print $5}'))"
+if skip_copy "$OLCRTC_BINARY" "$ROUTER_OLCRTC"; then
+    info "olcrtc $ROUTER_OLCRTC (unchanged, skipped)"
+else
+    log "Copying olcrtc binary ($((OLCRTC_SIZE / 1024)) KB)..."
+    cat "$OLCRTC_BINARY" | ssh $SSH_OPTS "$HOST" "cat > $ROUTER_OLCRTC && chmod 755 $ROUTER_OLCRTC"
+    info "olcrtc $ROUTER_OLCRTC ($(ssh $SSH_OPTS "$HOST" "ls -lh $ROUTER_OLCRTC" | awk '{print $5}'))"
+fi
 
 # ── Cleanup macOS AppleDouble files & sync UBIFS ──────────
 # macOS copies may leave resource-fork artifacts (._*). Also let UBIFS
@@ -177,7 +207,7 @@ cat "$REPO_DIR/luci-app-olcrtc/root/usr/share/rpcd/acl.d/luci-app-olcrtc.json" |
 cat "$REPO_DIR/luci-app-olcrtc/root/usr/share/luci/menu.d/luci-app-olcrtc.json" | \
     ssh $SSH_OPTS "$HOST" "cat > /usr/share/luci/menu.d/luci-app-olcrtc.json"
 # JS views (4 planes + shared statusbar module + network subviews)
-for f in statusbar control data network network_client network_server logs; do
+for f in statusbar bot tunnel network network_client network_server logs; do
     cat "$REPO_DIR/luci-app-olcrtc/htdocs/luci-static/resources/view/olcrtc/$f.js" | \
         ssh $SSH_OPTS "$HOST" "cat > /www/luci-static/resources/view/olcrtc/$f.js"
 done
@@ -258,7 +288,7 @@ fi
 check "LuCI olcRTC menu exists"       "[ -f /usr/share/luci/menu.d/luci-app-olcrtc.json ]"
 check "rpcd backend exists"           "[ -x /usr/libexec/rpcd/olcrtc-bot ]"
 check "rpcd ACL exists"               "[ -f /usr/share/rpcd/acl.d/luci-app-olcrtc.json ]"
-check "LuCI control.js exists"        "[ -f /www/luci-static/resources/view/olcrtc/control.js ]"
+check "LuCI bot.js exists"        "[ -f /www/luci-static/resources/view/olcrtc/bot.js ]"
 check "LuCI statusbar.js exists"      "[ -f /www/luci-static/resources/view/olcrtc/statusbar.js ]"
 
 # ── Flash usage (physical, post-GC) ─────────────────────────

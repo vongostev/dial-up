@@ -123,7 +123,8 @@ else
 fi
 
 echo ""
-echo "=== Verification ==="
+echo "── Sing-box verification ──────────────────────────"
+echo ""
 
 if uci -q get firewall.singbox_tproxy.path >/dev/null 2>&1; then
 	info "firewall.singbox_tproxy.type = $(uci -q get firewall.singbox_tproxy.type)"

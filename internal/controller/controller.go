@@ -1,4 +1,6 @@
 /*
+[2026-07-12] :: 🚀 :: Added TunnelRTTMs *int field to Status; snapshot() populates it from netCache.get() when hasRTT is true
+[2026-07-12] :: 🚀 :: Added manualDirect flag: SetRoute toggles it; loop promote is gated by !c.manualDirect; snapshot exposes it in Status.ManualDirect; crash/guardian demotes never touch the flag
 [2026-07-10] :: 🚀 :: Added tproxyGuardian wiring: New() creates it (client-mode only) with firewall.New + netCache.refresh callback; Start() starts it after netCache; Stop() stops it before process kill — couples nft tproxy chain to sing-box liveness (flush/reload) and demotes selector on dead olcrtc SOCKS :1080
 [2026-07-10] :: 🚀 :: loop() now calls RenderConfig(RenderParams{...}) passing SOCKS_PROXY_* fields for server-mode egress
 [2026-07-10] :: 🚀 :: Replaced synchronous PingDNS + singbox.Status calls in snapshot() with a background netCache (30s refresh, atomic.Pointer reads) — /s and /status now respond in microseconds instead of 2-4s
@@ -26,6 +28,7 @@ import (
 	"os/exec"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"syscall"
 	"time"
 
@@ -52,6 +55,9 @@ type Status struct {
 	PingDNS        string             `json:"ping_dns"`
 	SingBoxAlive   *bool              `json:"sing_box_alive"`
 	SingBoxRoute   string             `json:"sing_box_route"`
+	VkAlive        bool               `json:"vk_alive"`
+	ManualDirect   bool               `json:"manual_direct"`
+	TunnelRTTMs    *int               `json:"tunnel_rtt_ms"`
 }
 
 // Controller manages the olcrtc subprocess lifecycle in a single goroutine loop.
@@ -76,9 +82,12 @@ type Controller struct {
 	lastError     string
 	lastOutput    string
 	streamWg      *sync.WaitGroup
+	vkAlive       atomic.Bool
 
 	done chan struct{}
 	sig  chan struct{}
+
+	manualDirect bool
 }
 
 // New creates a Controller with the given config and logger.
@@ -212,18 +221,38 @@ func (c *Controller) Restart() {
 	}
 }
 
-// SetRoute manually switches the sing-box selector route (used by /m command).
+// SetRoute manually switches the sing-box selector route (used by /m command and the /route HTTP endpoint).
+// Sets manualDirect=true for "direct" (locks route, suppressing auto-promote); mode=proxy clears the lock.
 // No-op when IsClient is false (server mode does not use sing-box).
 // After a successful switch, triggers a cache refresh so /s shows the new route promptly.
 func (c *Controller) SetRoute(mode string) error {
 	if !c.cfg.IsClient {
 		return nil
 	}
+	cl := c.l.With(logger.Function("Controller.SetRoute"))
+
+	c.mu.Lock()
+	if mode == singbox.ModeDirect {
+		c.manualDirect = true
+		cl.Info("controller", "Manual DIRECT lock set, auto-promote suppressed", logger.Block("SetManualFlag"), logger.Status("OK"), logger.Importance(7))
+	} else {
+		c.manualDirect = false
+		cl.Info("controller", "Manual DIRECT lock cleared, auto-promote resumed", logger.Block("SetManualFlag"), logger.Status("OK"), logger.Importance(7))
+	}
+	c.mu.Unlock()
+
 	if err := c.singbox.SetRoute(mode); err != nil {
 		return fmt.Errorf("singbox: %w", err)
 	}
 	go c.netCache.refresh()
 	return nil
+}
+
+// - alive: true if VK long-poll is connected and running
+
+// SetVkAlive updates the VK connection health status.
+func (c *Controller) SetVkAlive(alive bool) {
+	c.vkAlive.Store(alive)
 }
 
 // calcBackoff returns an exponential backoff duration for repeated failures.
@@ -254,6 +283,8 @@ func (c *Controller) snapshot() Status {
 		Restarting:     c.restarting,
 		Failures:       c.failures,
 		CrashFailures:  c.crashFailures,
+		VkAlive:        c.vkAlive.Load(),
+		ManualDirect:   c.manualDirect,
 	}
 	if c.provider != nil {
 		s.Provider = new(*c.provider)
@@ -267,6 +298,11 @@ func (c *Controller) snapshot() Status {
 		alive := ns.sbAlive
 		s.SingBoxAlive = &alive
 		s.SingBoxRoute = ns.sbRoute
+
+		if ns.hasRTT {
+			v := ns.rttMs
+			s.TunnelRTTMs = &v
+		}
 	}
 
 	return s
@@ -348,7 +384,9 @@ func (c *Controller) loop(ctx context.Context) {
 						// Previously gated by c.failures > 0, so promotion never fired on
 						// first successful start (failures == 0). Now promotes unconditionally on >30s
 						// stability so the route is never stuck at "direct" on a healthy first run.
-						if c.cfg.IsClient {
+						// manualDirect flag suppresses auto-promote so a user-requested DIRECT
+						// sticks permanently until the user (or another /route call) switches back to proxy.
+						if c.cfg.IsClient && !c.manualDirect {
 							cl.Info("controller", "Promoting to proxy route", logger.Block("LoopTick"), logger.Status("ATTEMPT"), logger.Importance(6))
 							if err := c.singbox.SetRoute(singbox.ModeProxy); err != nil {
 								cl.Warn("controller", "Failed to set proxy route, will retry", logger.Block("LoopTick"), logger.Status("FAIL"), logger.Importance(6), logger.Error(err))
