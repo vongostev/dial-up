@@ -1,4 +1,5 @@
 /*
+[2026-07-12] :: 🚀 :: Added hasRTT/rttMs to netSnapshot; refresh() calls singbox.DelayTest() when sbStatus.Alive to cache tunnel RTT
 [2026-07-10] :: 🛡️ :: Added Stop() method with dedicated stop channel — Controller.Stop() now explicitly stops the cache goroutine without relying on ctx cancellation alone; moved initial refresh into the background goroutine so Start() returns immediately; SetRoute triggers an immediate refresh so /s reflects route changes promptly
 [2026-07-10] :: 🚀 :: Initial netCache: background-refreshing diagnostics cache (30s interval, atomic.Pointer for lock-free reads)
 */
@@ -22,6 +23,8 @@ type netSnapshot struct {
 	hasSingBox bool
 	sbAlive    bool
 	sbRoute    string
+	hasRTT     bool
+	rttMs      int
 }
 
 // netCache caches network diagnostics with background refresh.
@@ -88,10 +91,20 @@ func (nc *netCache) refresh() {
 		snap.hasSingBox = true
 		snap.sbAlive = sbStatus.Alive
 		snap.sbRoute = sbStatus.Route
+
+		if sbStatus.Alive {
+			rtt, err := nc.sb.DelayTest()
+			if err == nil && rtt > 0 {
+				snap.hasRTT = true
+				snap.rttMs = rtt
+			} else {
+				cl.Debug("controller", "Delay test skipped or failed", logger.Block("Collect"), logger.Status("SKIP"), logger.Importance(3), logger.Int("rtt", rtt), logger.Error(err))
+			}
+		}
 	}
 
 	nc.current.Store(&snap)
-	cl.Debug("controller", "Diagnostics cache refreshed", logger.Block("Collect"), logger.Status("OK"), logger.Importance(4), logger.String("ping", snap.pingDNS), logger.Bool("sbAlive", snap.sbAlive), logger.String("sbRoute", snap.sbRoute))
+	cl.Debug("controller", "Diagnostics cache refreshed", logger.Block("Collect"), logger.Status("OK"), logger.Importance(4), logger.String("ping", snap.pingDNS), logger.Bool("sbAlive", snap.sbAlive), logger.String("sbRoute", snap.sbRoute), logger.Bool("hasRTT", snap.hasRTT), logger.Int("rttMs", snap.rttMs))
 }
 
 // get returns the cached diagnostics snapshot via lock-free atomic load.

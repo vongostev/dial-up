@@ -14,20 +14,20 @@
       "path": "olcrtc/network"
     }
   },
-  "admin/services/olcrtc/data": {
+  "admin/services/olcrtc/tunnel": {
     "title": "Tunnel",
     "order": 20,
     "action": {
       "type": "view",
-      "path": "olcrtc/data"
+      "path": "olcrtc/tunnel"
     }
   },
-  "admin/services/olcrtc/control": {
+  "admin/services/olcrtc/bot": {
     "title": "Bot",
     "order": 10,
     "action": {
       "type": "view",
-      "path": "olcrtc/control"
+      "path": "olcrtc/bot"
     }
   },
   "admin/services/olcrtc/logs": {

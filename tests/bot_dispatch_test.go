@@ -51,6 +51,7 @@ func (c *fakeController) Restart()                  { c.restartCalled = true }
 func (c *fakeController) Status() controller.Status { return controller.Status{} }
 func (c *fakeController) StatusText() string        { return "fake-status" }
 func (c *fakeController) SetRoute(_ string) error   { return nil }
+func (c *fakeController) SetVkAlive(_ bool)         {}
 
 func TestDispatchCommands(t *testing.T) {
 	tests := []struct {

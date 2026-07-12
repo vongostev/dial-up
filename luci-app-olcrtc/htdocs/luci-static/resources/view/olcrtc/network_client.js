@@ -41,13 +41,13 @@ return baseclass.extend({
         this._topologySection = this._buildTopology(status, singbox);
         container.appendChild(this._topologySection);
         container.appendChild(this._buildWhitelist(whitelist));
-        container.appendChild(this._buildRouteOverride());
         container.appendChild(this._buildDiagnostics(firewall));
         this._setupPoll();
     },
 
     /* -- Live Traffic Flow topology (Modern UI) ---------- */
     _buildTopology: function (status, singbox) {
+        var self = this;
         var activeRoute = singbox.now || singbox.route || 'unknown';
 
         if (!document.getElementById('olcrtc-topo-styles')) {
@@ -56,6 +56,8 @@ return baseclass.extend({
                 '.olcrtc-topo-card { background: rgba(128,128,128,0.06); border: 2px solid rgba(128,128,128,0.12); border-radius: 16px; padding: 16px 20px; min-width: 220px; display: flex; flex-direction: column; align-items: center; transition: all 0.3s ease; box-shadow: 0 4px 12px rgba(0,0,0,0.02); }',
                 '.olcrtc-topo-card.active { border-color: #43a047; background: rgba(67, 160, 71, 0.08); }',
                 '.olcrtc-topo-card.active-pulse { animation: olcrtc-topo-pulse 2s infinite; }',
+                '.olcrtc-topo-card.selectable { cursor: pointer; transition: all 0.2s ease; }',
+                '.olcrtc-topo-card.selectable:hover { border-color: rgba(67, 160, 71, 0.5); box-shadow: 0 6px 20px rgba(67, 160, 71, 0.18); transform: translateY(-2px); }',
                 '.olcrtc-topo-title { font-weight: 600; font-size: 1.1em; margin-top: 10px; color: var(--text-color, inherit); }',
                 '.olcrtc-topo-sub { font-size: 0.85em; opacity: 0.7; margin-top: 6px; text-align: center; line-height: 1.4; }',
                 '.olcrtc-topo-icon { font-size: 2.2em; line-height: 1; display: flex; justify-content: center; align-items: center; width: 48px; height: 48px; background: rgba(128,128,128,0.08); border-radius: 12px; }',
@@ -118,17 +120,44 @@ return baseclass.extend({
 
                 E('div', { 'style': 'display: flex; gap: 24px; width: 100%; max-width: 550px; justify-content: center;' }, [
 
-                    E('div', { 'class': 'olcrtc-topo-card ' + (activeRoute === 'proxy' ? 'active active-pulse' : ''), 'style': 'flex: 1;' }, [
+                    E('div', {
+                        'class': 'olcrtc-topo-card selectable ' + (activeRoute === 'proxy' ? 'active active-pulse' : ''),
+                        'style': 'flex: 1;',
+                        'title': _('Click to route all traffic through proxy'),
+                        'click': function () {
+                            callSetRoute('proxy').then(function () {
+                                ui.addNotification(null, E('p', {}, [_('Route switched to') + ' proxy']), 'info');
+                                self._route = 'proxy';
+                            }).catch(function (err) {
+                                ui.addNotification(null, E('p', {}, [_('Error:') + ' ' + (err.message || err)]), 'error');
+                            });
+                        }
+                    }, [
                         E('div', { 'class': 'olcrtc-topo-icon' }, ['\ud83d\ude87']),
                         E('div', { 'class': 'olcrtc-topo-title' }, ['PROXY (olcRTC)']),
                         E('div', { 'class': 'olcrtc-topo-sub' }, ['SOCKS5 :1080', E('br'), 'DNS: Quad9'])
                     ]),
 
-                    E('div', { 'class': 'olcrtc-topo-card ' + (activeRoute === 'direct' ? 'active' : ''), 'style': 'flex: 1;' }, [
+                    E('div', {
+                        'class': 'olcrtc-topo-card selectable ' + (activeRoute === 'direct' ? 'active' : ''),
+                        'style': 'flex: 1;',
+                        'title': _('Click to route all traffic directly (bypass proxy)'),
+                        'click': function () {
+                            callSetRoute('direct').then(function () {
+                                ui.addNotification(null, E('p', {}, [_('Route switched to') + ' direct']), 'info');
+                                self._route = 'direct';
+                            }).catch(function (err) {
+                                ui.addNotification(null, E('p', {}, [_('Error:') + ' ' + (err.message || err)]), 'error');
+                            });
+                        }
+                    }, [
                         E('div', { 'class': 'olcrtc-topo-icon' }, ['\ud83c\udf0d']),
                         E('div', { 'class': 'olcrtc-topo-title' }, ['DIRECT']),
                         E('div', { 'class': 'olcrtc-topo-sub' }, ['ISP / Internet', E('br'), 'DNS: Yandex'])
                     ])
+                ]),
+                E('p', {'style': 'text-align: center; opacity: 0.6; font-size: 0.85em; margin-top: 10px;'}, [
+                    '\ud83d\udc49 ' + _('Click PROXY or DIRECT to override the route. The bot auto-promotes proxy when stable.')
                 ])
             ])
         ]);
@@ -181,52 +210,10 @@ return baseclass.extend({
                         ui.addNotification(null, E('p', {}, [_('Error:') + ' ' + (err.message || err)]), 'error');
                     });
                 }
-            }, ['\ud83d\udcbe ' + _('Save & Reload Sing-box')])
+            }, ['\ud83d\udcbe ' + _('Save & Restart Sing-Box')])
         ]));
 
         return section;
-    },
-
-    /* -- Manual Routing Override -------------------------- */
-    _buildRouteOverride: function () {
-        var self = this;
-        var current = this._route;
-
-        function radio(value, label, hint) {
-            var r = E('input', {
-                'type': 'radio', 'name': 'route-override', 'value': value,
-                'change': function () {
-                    if (value === 'auto') {
-                        ui.addNotification(null, E('p', {},
-                            [_('Bot controls the route automatically (auto-promotes proxy on stable > 30s).')]), 'info');
-                        return;
-                    }
-                    callSetRoute({mode: value}).then(function () {
-                        ui.addNotification(null, E('p', {}, [_('Route switched to') + ' ' + value]), 'info');
-                        self._route = value;
-                    }).catch(function (err) {
-                        ui.addNotification(null, E('p', {}, [_('Error:') + ' ' + (err.message || err)]), 'error');
-                    });
-                }
-            });
-            if ((value === 'auto' && (current !== 'proxy' && current !== 'direct')) || value === current) r.checked = true;
-            return E('label', {'style': 'margin-right: 18px; cursor: pointer;'}, [
-                r, ' ', E('span', {'style': 'font-weight: bold;'}, [label]), ' ',
-                E('span', {'style': 'opacity: 0.7; font-size: 0.8em;'}, [hint])
-            ]);
-        }
-
-        return E('div', {'class': 'cbi-section'}, [
-            E('h3', {}, [_('Manual Routing Override')]),
-            E('div', {'style': 'margin: 10px 0;'}, [
-                radio('auto', '\ud83e\udd16 ' + _('Auto (Bot)'), ''),
-                radio('direct', '\ud83c\udf0d ' + _('Direct'), ''),
-                radio('proxy', '\ud83d\ude87 ' + _('Proxy'), '')
-            ]),
-            E('p', {'class': 'cbi-section-descr'}, [
-                '\u2139\ufe0f ' + _('Direct/Proxy apply immediately via the sing-box selector; Auto is cosmetic \u2014 the bot still auto-promotes proxy when stable.')
-            ])
-        ]);
     },
 
     /* -- Diagnostics (firewall) --------------------------- */

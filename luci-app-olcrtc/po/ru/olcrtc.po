@@ -20,8 +20,8 @@ msgstr "Сеть"
 msgid "Logs"
 msgstr "Логи"
 
-msgid "Orchestrator"
-msgstr "Оркестратор"
+msgid "Bot"
+msgstr "Бот"
 
 msgid "Tunnel"
 msgstr "Туннель"
@@ -131,7 +131,7 @@ msgstr "Остановлен"
 msgid "Current Provider"
 msgstr "Текущий провайдер"
 
-msgid "Active Transport"
+msgid "Active Carrier"
 msgstr "Активный транспорт"
 
 msgid "Tunnel Metrics & Health (Live)"
@@ -272,18 +272,6 @@ msgstr "Сохранить и перезагрузить Sing-box"
 msgid "Whitelist saved"
 msgstr "Белый список сохранён"
 
-msgid "Manual Routing Override"
-msgstr "Ручное переопределение маршрута"
-
-msgid "Auto (Bot)"
-msgstr "Авто (бот)"
-
-msgid "Direct"
-msgstr "Напрямую"
-
-msgid "Proxy"
-msgstr "Прокси"
-
 msgid "Direct/Proxy apply immediately via the sing-box selector; Auto is cosmetic — the bot still auto-promotes proxy when stable."
 msgstr "Напрямую/Прокси применяются немедленно через селектор sing-box; Авто — косметика, бот всё равно повышает до прокси при стабилизации."
 
@@ -329,8 +317,8 @@ msgstr "Все сервисы"
 msgid "Bot Only"
 msgstr "Только бот"
 
-msgid "Core (Tunnel)"
-msgstr "Ядро (туннель)"
+msgid "OlcRTC"
+msgstr "OlcRTC"
 
 msgid "Sing-box"
 msgstr "Sing-box"

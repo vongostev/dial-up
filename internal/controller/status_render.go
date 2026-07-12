@@ -1,4 +1,6 @@
 /*
+[2026-07-12] :: 🚀 :: Added ⚡ RTT туннеля: Nms line (client mode, when TunnelRTTMs is non-nil)
+[2026-07-12] :: 🚀 :: Added 🔒 Маршрут зафиксирован: direct line when ManualDirect is true (manual DIRECT lock indicator)
 [2026-07-08] :: 🚀 :: Added PingDNS, SingBoxAlive, SingBoxRoute rendering lines
 [2026-07-02] :: 🚀 :: Initial status render with Russian emoji formatting
 */
@@ -18,10 +20,16 @@ func RenderStatus(s Status) string {
 	b.WriteString("━━━━━━━━━━━━━━━━\n")
 
 	// Процесс
-	if s.HasProcess {
-		b.WriteString("🟢 Процесс: работает\n")
+	if s.VkAlive {
+		b.WriteString("🟢 Бот: в сети\n")
 	} else {
-		b.WriteString("🔴 Процесс: остановлен\n")
+		b.WriteString("🔴 Бот: не в сети\n")
+	}
+
+	if s.HasProcess {
+		b.WriteString("🟢 Тоннель: работает\n")
+	} else {
+		b.WriteString("🔴 Тоннель: остановлен\n")
 	}
 
 	// Провайдер
@@ -106,6 +114,18 @@ func RenderStatus(s Status) string {
 			b.WriteString("—")
 		}
 		b.WriteString("\n")
+	}
+
+	// Manual DIRECT lock indicator
+	if s.ManualDirect {
+		b.WriteString("🔒 Маршрут зафиксирован: direct\n")
+	}
+
+	// Tunnel RTT (client only: TunnelRTTMs != nil)
+	if s.TunnelRTTMs != nil {
+		b.WriteString("⚡ RTT туннеля: ")
+		b.WriteString(strconv.Itoa(*s.TunnelRTTMs))
+		b.WriteString("ms\n")
 	}
 
 	return b.String()

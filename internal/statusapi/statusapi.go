@@ -1,4 +1,5 @@
 /*
+[2026-07-12] :: 🚀 :: Added PUT/POST /route handler with routeFn wiring; New() now accepts routeFn func(string)error for single-source-of-truth route switching (sets manualDirect flag on Controller)
 [2026-07-09] :: 🚀 :: Initial statusapi: loopback GET /status (controller.Status JSON) + /healthz, graceful ctx shutdown, non-fatal bind
 */
 
@@ -15,6 +16,7 @@ import (
 
 	"dial-up/internal/controller"
 	"dial-up/internal/domain/logger"
+	"dial-up/internal/singbox"
 )
 
 const logCategory = "statusapi"
@@ -23,14 +25,15 @@ const logCategory = "statusapi"
 type Server struct {
 	addr     string
 	statusFn func() controller.Status
+	routeFn  func(string) error
 	l        logger.Logger
 	server   *http.Server
 	listener net.Listener
 }
 
-// New creates a Server that will serve statusFn snapshots on addr.
-func New(addr string, statusFn func() controller.Status, l logger.Logger) *Server {
-	return &Server{addr: addr, statusFn: statusFn, l: l}
+// New creates a Server that will serve statusFn snapshots and routeFn for /route on addr.
+func New(addr string, statusFn func() controller.Status, routeFn func(string) error, l logger.Logger) *Server {
+	return &Server{addr: addr, statusFn: statusFn, routeFn: routeFn, l: l}
 }
 
 // Start binds the listener and serves requests until ctx is cancelled.
@@ -100,6 +103,46 @@ func (s *Server) handler(w http.ResponseWriter, r *http.Request) {
 	case "/healthz":
 		w.Header().Set("Content-Type", "text/plain; charset=utf-8")
 		_, _ = w.Write([]byte("ok"))
+	case "/route":
+		if s.routeFn == nil {
+			w.WriteHeader(http.StatusNotFound)
+			return
+		}
+		if r.Method != http.MethodPut && r.Method != http.MethodPost {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusMethodNotAllowed)
+			_, _ = w.Write([]byte(`{"error":"method not allowed, use PUT or POST"}`))
+			return
+		}
+
+		var body struct {
+			Mode string `json:"mode"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusBadRequest)
+			_, _ = w.Write([]byte(`{"error":"invalid JSON: ` + err.Error() + `"}`))
+			return
+		}
+
+		if body.Mode != singbox.ModeProxy && body.Mode != singbox.ModeDirect {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusBadRequest)
+			_, _ = w.Write([]byte(`{"error":"invalid mode: must be 'proxy' or 'direct'"}`))
+			return
+		}
+
+		if err := s.routeFn(body.Mode); err != nil {
+			cl.Error(logCategory, "Route set failed", logger.Block("RouteSet"), logger.Status("FAIL"), logger.Importance(7), logger.Error(err), logger.String("mode", body.Mode))
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusInternalServerError)
+			_, _ = w.Write([]byte(`{"error":"` + err.Error() + `"}`))
+			return
+		}
+
+		cl.Info(logCategory, "Route switched", logger.Block("RouteSet"), logger.Status("OK"), logger.Importance(7), logger.String("mode", body.Mode))
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"ok":true}`))
 	default:
 		w.WriteHeader(http.StatusNotFound)
 	}

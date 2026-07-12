@@ -1,4 +1,5 @@
 /*
+[2026-07-12] :: 🚀 :: Added DelayTest to Controller interface + ControllerImpl — GET /proxies/proxy/delay with dedicated 8s HTTP client, returns RTT in ms
 [2026-07-08] :: 🚀 :: Added Status struct, Status() to Controller interface and ControllerImpl via GET /proxies/route-select
 [2026-07-08] :: 🏗️ :: Removed init.d lifecycle methods (Start/Stop/Status/Restart); sing-box managed exclusively by init.d
 [2026-07-07] :: 🚀 :: Added Controller interface + SetRoute via Clash API; clashAddr configurable
@@ -40,13 +41,15 @@ type Status struct {
 type Controller interface {
 	SetRoute(mode string) error
 	Status() (Status, error)
+	DelayTest() (int, error)
 }
 
 // ControllerImpl switches the sing-box selector outbound via Clash API.
 type ControllerImpl struct {
-	l          logger.Logger
-	ClashAddr  string
-	httpClient *http.Client
+	l           logger.Logger
+	ClashAddr   string
+	httpClient  *http.Client
+	delayClient *http.Client
 }
 
 // New creates a ControllerImpl with the given logger.
@@ -56,6 +59,9 @@ func New(l logger.Logger) *ControllerImpl {
 		ClashAddr: defaultClashAddr,
 		httpClient: &http.Client{
 			Timeout: 5 * time.Second,
+		},
+		delayClient: &http.Client{
+			Timeout: 8 * time.Second,
 		},
 	}
 }
@@ -147,4 +153,54 @@ func (c *ControllerImpl) Status() (Status, error) {
 	cl.Info(logCategory, "Selector status retrieved", logger.Block("ClashGet"), logger.Status("OK"), logger.Importance(5), logger.String("route", body.Now))
 
 	return Status{Alive: true, Route: body.Now}, nil
+}
+
+// delayTestURL is the Clash API path for the proxy delay test.
+const delayTestURL = "/proxies/proxy/delay?url=http%3A%2F%2Fcp.cloudflare.com&timeout=5000"
+
+// DelayTest measures tunnel RTT through the proxy outbound via the Clash API delay endpoint.
+func (c *ControllerImpl) DelayTest() (int, error) {
+	cl := c.l.With(logger.Function("ControllerImpl.DelayTest"))
+
+	url := fmt.Sprintf("http://%s%s", c.ClashAddr, delayTestURL)
+
+	cl.Debug(logCategory, "Requesting delay test", logger.Block("DelayGet"), logger.Status("ATTEMPT"), logger.Importance(4))
+
+	ctx, cancel := context.WithTimeout(context.Background(), 8*time.Second)
+	defer cancel()
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
+	if err != nil {
+		cl.Warn(logCategory, "Failed to create delay request", logger.Block("DelayGet"), logger.Status("FAIL"), logger.Importance(6), logger.Error(err))
+		return 0, fmt.Errorf("delay test request: %w", err)
+	}
+
+	resp, err := c.delayClient.Do(req)
+	if err != nil {
+		cl.Warn(logCategory, "Delay test HTTP failed", logger.Block("DelayGet"), logger.Status("FAIL"), logger.Importance(6), logger.Error(err))
+		return 0, fmt.Errorf("delay test: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		cl.Warn(logCategory, "Delay test unexpected status", logger.Block("DelayGet"), logger.Status("FAIL"), logger.Importance(5), logger.Int("status", resp.StatusCode))
+		return 0, fmt.Errorf("delay test: unexpected status %d", resp.StatusCode)
+	}
+
+	var body struct {
+		Delay int `json:"delay"`
+	}
+	if err := json.NewDecoder(io.LimitReader(resp.Body, 1<<12)).Decode(&body); err != nil {
+		cl.Warn(logCategory, "Failed to parse delay response", logger.Block("DelayGet"), logger.Status("FAIL"), logger.Importance(6), logger.Error(err))
+		return 0, fmt.Errorf("delay test parse: %w", err)
+	}
+
+	if body.Delay <= 0 {
+		cl.Warn(logCategory, "Delay test returned invalid delay", logger.Block("DelayGet"), logger.Status("FAIL"), logger.Importance(5), logger.Int("delay", body.Delay))
+		return 0, fmt.Errorf("delay test: invalid delay %d", body.Delay)
+	}
+
+	cl.Info(logCategory, "Delay test completed", logger.Block("DelayGet"), logger.Status("OK"), logger.Importance(5), logger.Int("delay", body.Delay))
+
+	return body.Delay, nil
 }

@@ -1,12 +1,15 @@
 /*
+[2026-07-12] :: 🚀 :: Added /route handler tests: valid (direct+proxy), invalid mode, routeFn error, nil routeFn, wrong method
 [2026-07-09] :: 🚀 :: Initial statusapi test suite
 */
 
 package tests
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"io"
 	"net/http"
 	"strings"
@@ -20,12 +23,12 @@ import (
 	"dial-up/internal/statusapi"
 )
 
-// newStatusServer builds a Server on an ephemeral loopback port with the given snapshot.
-func newStatusServer(t *testing.T, st controller.Status) (*statusapi.Server, context.CancelFunc) {
+// newStatusServer builds a Server on an ephemeral loopback port with the given snapshot and optional routeFn.
+func newStatusServer(t *testing.T, st controller.Status, routeFn func(string) error) (*statusapi.Server, context.CancelFunc) {
 	t.Helper()
 	l := logger.New(true)
 	ctx, cancel := context.WithCancel(context.Background())
-	s := statusapi.New("127.0.0.1:0", func() controller.Status { return st }, l)
+	s := statusapi.New("127.0.0.1:0", func() controller.Status { return st }, routeFn, l)
 	if err := s.Start(ctx); err != nil {
 		cancel()
 		t.Fatalf("Start failed: %v", err)
@@ -61,7 +64,7 @@ func TestStatusHandlerNilProvider(t *testing.T) {
 		Provider:      nil,
 		PingDNS:       "14ms",
 	}
-	s, cancel := newStatusServer(t, want)
+	s, cancel := newStatusServer(t, want, nil)
 	defer cancel()
 
 	code, ct, body := doGet(t, "http://"+s.Addr()+"/status")
@@ -89,7 +92,7 @@ func TestStatusHandlerSetProvider(t *testing.T) {
 		HasProcess: false,
 		Provider:   &provider.Provider{Kind: provider.ProviderWbStream, RoomID: "019f33d5-c73d-7a09-ba85-b874bd1fceab"},
 	}
-	s, cancel := newStatusServer(t, want)
+	s, cancel := newStatusServer(t, want, nil)
 	defer cancel()
 
 	code, _, body := doGet(t, "http://"+s.Addr()+"/status")
@@ -110,7 +113,7 @@ func TestStatusHandlerSetProvider(t *testing.T) {
 }
 
 func TestHealthZ(t *testing.T) {
-	s, cancel := newStatusServer(t, controller.Status{})
+	s, cancel := newStatusServer(t, controller.Status{}, nil)
 	defer cancel()
 
 	code, _, body := doGet(t, "http://"+s.Addr()+"/healthz")
@@ -123,7 +126,7 @@ func TestHealthZ(t *testing.T) {
 }
 
 func TestUnknownPath(t *testing.T) {
-	s, cancel := newStatusServer(t, controller.Status{})
+	s, cancel := newStatusServer(t, controller.Status{}, nil)
 	defer cancel()
 
 	code, _, _ := doGet(t, "http://"+s.Addr()+"/does-not-exist")
@@ -132,8 +135,110 @@ func TestUnknownPath(t *testing.T) {
 	}
 }
 
+func TestRouteHandlerValid(t *testing.T) {
+	var invoked string
+	routeFn := func(mode string) error {
+		invoked = mode
+		return nil
+	}
+	s, cancel := newStatusServer(t, controller.Status{}, routeFn)
+	defer cancel()
+
+	tests := []struct {
+		mode string
+	}{
+		{mode: "direct"},
+		{mode: "proxy"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.mode, func(t *testing.T) {
+			invoked = ""
+			body := `{"mode":"` + tt.mode + `"}`
+			req, _ := http.NewRequest(http.MethodPut, "http://"+s.Addr()+"/route", bytes.NewReader([]byte(body)))
+			resp, err := http.DefaultClient.Do(req)
+			if err != nil {
+				t.Fatalf("request failed: %v", err)
+			}
+			defer resp.Body.Close()
+			if resp.StatusCode != http.StatusOK {
+				t.Fatalf("status code = %d, want 200", resp.StatusCode)
+			}
+			b, _ := io.ReadAll(resp.Body)
+			if !strings.Contains(string(b), `"ok":true`) {
+				t.Fatalf("response body missing ok: %s", string(b))
+			}
+			if invoked != tt.mode {
+				t.Errorf("routeFn invoked with %q, want %q", invoked, tt.mode)
+			}
+		})
+	}
+}
+
+func TestRouteHandlerInvalidMode(t *testing.T) {
+	s, cancel := newStatusServer(t, controller.Status{}, func(mode string) error { return nil })
+	defer cancel()
+
+	body := `{"mode":"bogus"}`
+	req, _ := http.NewRequest(http.MethodPut, "http://"+s.Addr()+"/route", bytes.NewReader([]byte(body)))
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("request failed: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusBadRequest {
+		t.Fatalf("status code = %d, want 400", resp.StatusCode)
+	}
+	b, _ := io.ReadAll(resp.Body)
+	if !strings.Contains(string(b), "invalid mode") {
+		t.Fatalf("response body missing invalid mode error: %s", string(b))
+	}
+}
+
+func TestRouteHandlerRouteFnError(t *testing.T) {
+	s, cancel := newStatusServer(t, controller.Status{}, func(mode string) error { return errors.New("boom") })
+	defer cancel()
+
+	body := `{"mode":"direct"}`
+	req, _ := http.NewRequest(http.MethodPut, "http://"+s.Addr()+"/route", bytes.NewReader([]byte(body)))
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("request failed: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusInternalServerError {
+		t.Fatalf("status code = %d, want 500", resp.StatusCode)
+	}
+}
+
+func TestRouteHandlerNilFn(t *testing.T) {
+	s, cancel := newStatusServer(t, controller.Status{}, nil)
+	defer cancel()
+
+	body := `{"mode":"direct"}`
+	req, _ := http.NewRequest(http.MethodPut, "http://"+s.Addr()+"/route", bytes.NewReader([]byte(body)))
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("request failed: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusNotFound {
+		t.Fatalf("status code = %d, want 404", resp.StatusCode)
+	}
+}
+
+func TestRouteHandlerBadMethod(t *testing.T) {
+	s, cancel := newStatusServer(t, controller.Status{}, func(mode string) error { return nil })
+	defer cancel()
+
+	code, _, body := doGet(t, "http://"+s.Addr()+"/route")
+	if code != http.StatusMethodNotAllowed {
+		t.Fatalf("status code = %d, want 405; body=%s", code, body)
+	}
+}
+
 func TestStatusServeOverListener(t *testing.T) {
-	s, cancel := newStatusServer(t, controller.Status{SingBoxRoute: singbox.ModeProxy})
+	s, cancel := newStatusServer(t, controller.Status{SingBoxRoute: singbox.ModeProxy}, nil)
 	defer cancel()
 
 	if s.Addr() == "" {
@@ -152,7 +257,7 @@ func TestStartBadPort(t *testing.T) {
 	l := logger.New(true)
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	s := statusapi.New("127.0.0.1:bogus", func() controller.Status { return controller.Status{} }, l)
+	s := statusapi.New("127.0.0.1:bogus", func() controller.Status { return controller.Status{} }, nil, l)
 	if err := s.Start(ctx); err == nil {
 		t.Fatal("Start with bogus address should return an error")
 	}
@@ -162,7 +267,7 @@ func TestStartBadPort(t *testing.T) {
 }
 
 func TestGracefulShutdown(t *testing.T) {
-	s, cancel := newStatusServer(t, controller.Status{})
+	s, cancel := newStatusServer(t, controller.Status{}, nil)
 	addr := s.Addr()
 
 	// Sanity: server is up

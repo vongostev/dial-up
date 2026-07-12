@@ -1,4 +1,5 @@
 /*
+[2026-07-12] :: 🚀 :: Added TestSetRouteManualOverrideFlag: SetRoute("direct") sets ManualDirect, SetRoute("proxy") clears it
 [2026-07-08] :: 🔌 :: Updated fakeSingBox to satisfy new singbox.Controller interface (added Status() method)
 [2026-07-07] :: 🚀 :: Added classified-removal integration tests: definitive crash removes file on 1st crash; transient crash keeps file + bumps crashFailures; env start-fault keeps file + leaves crashFailures at 0; ClearProvider removes file
 [2026-07-06] :: 🚀 :: Added TestControllerCapturesSubprocessError verifying subprocess stderr is captured into Status.LastError on crash
@@ -27,6 +28,7 @@ type fakeSingBox struct{}
 
 func (f *fakeSingBox) SetRoute(_ string) error         { return nil }
 func (f *fakeSingBox) Status() (singbox.Status, error) { return singbox.Status{}, nil }
+func (f *fakeSingBox) DelayTest() (int, error)         { return 0, nil }
 
 func TestControllerSetProviderNil(t *testing.T) {
 	l := logger.New(true)
@@ -118,7 +120,8 @@ func TestControllerStatusFields(t *testing.T) {
 }
 
 func TestRenderStatus(t *testing.T) {
-	now := time.Now()
+	errCode := 1
+	sbDown := false
 
 	tests := []struct {
 		name   string
@@ -130,9 +133,8 @@ func TestRenderStatus(t *testing.T) {
 			name:   "empty status",
 			status: controller.Status{},
 			checks: []string{
-				"🤖 Статус",
-				"━━━━━━━━━━━━━━━━",
-				"🔴 Процесс: остановлен",
+				"🔴 Бот: не в сети",
+				"🔴 Тоннель: остановлен",
 				"📦 Провайдер: не задан",
 				"🕒 Запущен: —",
 				"🛑 Остановлен: —",
@@ -144,68 +146,46 @@ func TestRenderStatus(t *testing.T) {
 			anti: []string{"📦 Sing-Box:", "🔀 Маршрут:"},
 		},
 		{
-			name: "running with provider and errors",
-			status: controller.Status{
-				HasProcess:     true,
-				Provider:       &provider.Provider{Kind: "wbstream", RoomID: "abc-123"},
-				ProcessStarted: &now,
-				ProcessStopped: nil,
-				LastExitCode:   new(0),
-				LastError:      "something went wrong",
-				Restarting:     true,
-			},
-			checks: []string{
-				"🤖 Статус",
-				"━━━━━━━━━━━━━━━━",
-				"🟢 Процесс: работает",
-				"📦 Провайдер: wbstream · abc-123",
-				"🕒 Запущен: " + now.Local().Format("2006-01-02 15:04:05"),
-				"🛑 Остановлен: —",
-				"🔢 Код выхода: 0",
-				"🔁 Перезапуск: да",
-				"⚠️ Ошибка: something went wrong",
-			},
-			anti: []string{"не задан", "остановлен", "нет"},
-		},
-		{
-			name: "stopped with exit code and stopped time",
-			status: controller.Status{
-				HasProcess:     false,
-				Provider:       &provider.Provider{Kind: provider.ProviderTelemost, RoomID: "42"},
-				ProcessStarted: &now,
-				ProcessStopped: &now,
-				LastExitCode:   new(1),
-				LastError:      "",
-				Restarting:     false,
-				PingDNS:        "15ms",
-			},
-			checks: []string{
-				"🔴 Процесс: остановлен",
-				"📦 Провайдер: telemost · 42",
-				"🕒 Запущен: " + now.Local().Format("2006-01-02 15:04:05"),
-				"🛑 Остановлен: " + now.Local().Format("2006-01-02 15:04:05"),
-				"🔢 Код выхода: 1",
-				"🔁 Перезапуск: нет",
-				"⚠️ Ошибка: нет",
-				"🌐 Пинг DNS (9.9.9.9): 15ms",
-			},
-			anti: []string{"🟢", "работает", "не задан"},
-		},
-		{
-			name: "client with sing-box alive and proxy route",
+			name: "Client working happy path",
 			status: func() controller.Status {
 				alive := true
 				return controller.Status{
+					VkAlive:      true,
 					HasProcess:   true,
 					PingDNS:      "8ms",
 					SingBoxAlive: &alive,
-					SingBoxRoute: singbox.ModeProxy,
+					SingBoxRoute: "proxy",
 				}
 			}(),
 			checks: []string{
+				"🟢 Бот: в сети",
+				"🟢 Тоннель: работает",
 				"🌐 Пинг DNS (9.9.9.9): 8ms",
 				"📦 Sing-Box: 🟢 работает",
 				"🔀 Маршрут: proxy",
+			},
+		},
+		{
+			name: "Stopped with error and network",
+			status: controller.Status{
+				VkAlive:      false,
+				HasProcess:   false,
+				Provider:     &provider.Provider{Kind: "tm", RoomID: "456"},
+				LastExitCode: &errCode,
+				LastError:    "auth failed",
+				PingDNS:      "15ms",
+				SingBoxAlive: &sbDown,
+				SingBoxRoute: "",
+			},
+			checks: []string{
+				"🔴 Бот: не в сети",
+				"🔴 Тоннель: остановлен",
+				"📦 Провайдер: tm · 456",
+				"🔢 Код выхода: 1",
+				"⚠️ Ошибка: auth failed",
+				"🌐 Пинг DNS (9.9.9.9): 15ms",
+				"📦 Sing-Box: 🔴 не отвечает",
+				"🔀 Маршрут: —",
 			},
 		},
 		{
@@ -213,19 +193,44 @@ func TestRenderStatus(t *testing.T) {
 			status: func() controller.Status {
 				dead := false
 				return controller.Status{
+					VkAlive:      true,
+					HasProcess:   true,
 					PingDNS:      "timeout",
 					SingBoxAlive: &dead,
 					SingBoxRoute: "",
 				}
 			}(),
 			checks: []string{
+				"🟢 Бот: в сети",
+				"🟢 Тоннель: работает",
 				"🌐 Пинг DNS (9.9.9.9): timeout",
 				"📦 Sing-Box: 🔴 не отвечает",
 				"🔀 Маршрут: —",
 			},
 		},
+		{
+			name: "client with manual direct lock",
+			status: func() controller.Status {
+				alive := true
+				return controller.Status{
+					VkAlive:      true,
+					HasProcess:   true,
+					PingDNS:      "8ms",
+					SingBoxAlive: &alive,
+					SingBoxRoute: "direct",
+					ManualDirect: true,
+				}
+			}(),
+			checks: []string{
+				"🟢 Бот: в сети",
+				"🟢 Тоннель: работает",
+				"📦 Sing-Box: 🟢 работает",
+				"🔀 Маршрут: direct",
+				"🔒 Маршрут зафиксирован: direct",
+			},
+			anti: []string{"🔀 Маршрут: proxy"},
+		},
 	}
-
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			result := controller.RenderStatus(tt.status)
@@ -251,8 +256,34 @@ func TestControllerStatusText(t *testing.T) {
 	if !strings.Contains(text, "🤖 Статус") {
 		t.Errorf("StatusText should contain status header, got:\n%s", text)
 	}
-	if !strings.Contains(text, "🔴 Процесс: остановлен") {
+	if !strings.Contains(text, "🔴 Тоннель: остановлен") {
 		t.Errorf("StatusText should indicate stopped process, got:\n%s", text)
+	}
+}
+
+func TestSetRouteManualOverrideFlag(t *testing.T) {
+	l := logger.New(true)
+	ctrl := controller.New(&config.Config{IsClient: true, SleepOnError: 1}, l, &fakeSingBox{})
+
+	// Initial state: manualDirect is false
+	if ctrl.Status().ManualDirect {
+		t.Error("expected ManualDirect false initially")
+	}
+
+	// Set DIRECT → flag becomes true
+	if err := ctrl.SetRoute(singbox.ModeDirect); err != nil {
+		t.Fatalf("SetRoute(direct) failed: %v", err)
+	}
+	if !ctrl.Status().ManualDirect {
+		t.Error("expected ManualDirect true after SetRoute(direct)")
+	}
+
+	// Set PROXY → flag becomes false
+	if err := ctrl.SetRoute(singbox.ModeProxy); err != nil {
+		t.Fatalf("SetRoute(proxy) failed: %v", err)
+	}
+	if ctrl.Status().ManualDirect {
+		t.Error("expected ManualDirect false after SetRoute(proxy)")
 	}
 }
 

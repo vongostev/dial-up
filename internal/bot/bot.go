@@ -1,4 +1,5 @@
 /*
+[2026-07-12] :: 🐛 :: Fixed cold-boot dead-bot: longpoll.NewLongPoll construction (live DNS+HTTP call) moved inside Run() reconnect loop so boot-time DNS SERVFAIL is retried with backoff instead of returning fatally and exhausting procd respawn. Added stable-run (>30s) backoff reset and an injectable longPollFactory hook for deterministic tests.
 [2026-07-07] :: 🚀 :: Added mode-proxy/mode-direct button dispatch via handleSetRouteMode; buildMenuKeyboard now receives isClient for conditional second row
 [2026-07-07] :: 🚀 :: Added ClearProvider() to Controller interface; handleStop ("/n" / Stop button) now routes through ClearProvider so stop means forget — the running tunnel is killed AND last_provider.json is deleted (no auto-reconnect after reboot)
 [2026-07-07] :: 🚀 :: Added SetRoute to Controller interface; /m proxy|direct command handler
@@ -46,20 +47,35 @@ type Controller interface {
 	Status() controller.Status
 	StatusText() string
 	SetRoute(mode string) error
+	SetVkAlive(alive bool)
 }
 
 const serverPrefix = "📡 Сервер "
 
 const clientPrefix = "📺 Клиент "
 
+/*
+- initialLongPollBackoff: first backoff after a construction or run failure.
+- maxLongPollBackoff: cap so repeated failures don't stall message recovery.
+- stableRunThreshold: a long-poll Run() surviving this long resets backoff — a boot-time
+  DNS glitch must not permanently inflate backoff for the process lifetime.
+*/
+
+const (
+	initialLongPollBackoff = 1 * time.Second
+	maxLongPollBackoff     = 60 * time.Second
+	stableRunThreshold     = 30 * time.Second
+)
+
 // Bot is a VK user long-poll bot with command dispatch and auto-reconnect.
 type Bot struct {
-	vk         *api.VK
-	controller Controller
-	cfg        *config.Config
-	l          logger.Logger
-	sender     Sender
-	allowedIDs map[int]bool
+	vk              *api.VK
+	controller      Controller
+	cfg             *config.Config
+	l               logger.Logger
+	sender          Sender
+	allowedIDs      map[int]bool
+	longPollFactory func() (*longpoll.LongPoll, error)
 }
 
 // New creates a Bot with the given VK client, controller, config, and logger.
@@ -83,53 +99,85 @@ func New(vk *api.VK, ctrl Controller, cfg *config.Config, l logger.Logger) *Bot 
 	return b
 }
 
-// Run starts the long-poll loop with exponential backoff reconnection.
+// Run starts the long-poll loop with exponential backoff reconnection, retrying both
+// long-poll construction and the long-poll stream itself until ctx is cancelled.
 func (b *Bot) Run(ctx context.Context) error {
 	cl := b.l.With(logger.Function("Bot.Run"))
 
-	lp, err := longpoll.NewLongPoll(b.vk, longpoll.ReceiveAttachments|longpoll.ExtendedEvents)
-	if err != nil {
-		return fmt.Errorf("failed to create longpoll: %w", err)
-	}
-	lp.Wait = 5
-
-	w := wrapper.NewWrapper(lp)
-	w.OnNewMessage(b.handle)
-
-	backoff := 1 * time.Second
-	const maxBackoff = 60 * time.Second
+	backoff := initialLongPollBackoff
 
 	for {
-		cl.Info("bot", "Starting long-poll handler", logger.Status("ATTEMPT"), logger.Importance(5))
+		// live DNS+HTTP call; at cold boot DNS may SERVFAIL. Retrying here (instead of
+		// returning fatally) lets the bot self-heal once dnsmasq's upstream is ready.
+		b.controller.SetVkAlive(false)
+		lp, constructErr := b.newLongPoll()
+		if constructErr != nil {
+			cl.Warn("bot", "Long-poll construction failed, retrying", logger.Block("Construct"), logger.Status("FAIL"), logger.Importance(7), logger.Error(constructErr), logger.Any("backoff", backoff.String()))
+			if !sleepCtx(ctx, backoff) {
+				return nil
+			}
+			backoff = growBackoff(backoff)
+			continue
+		}
+		lp.Wait = 5
 
+		w := wrapper.NewWrapper(lp)
+		w.OnNewMessage(b.handle)
+
+		runStarted := time.Now()
+		b.controller.SetVkAlive(true)
 		runErr := lp.Run()
+		b.controller.SetVkAlive(false)
+		lp.Shutdown()
 
 		select {
 		case <-ctx.Done():
 			cl.Info("bot", "Context cancelled, shutting down", logger.Status("OK"), logger.Importance(5))
-			lp.Shutdown()
 			return nil
 		default:
 		}
 
-		if runErr != nil {
-			cl.Warn("bot", "Long-poll error", logger.Block("Reconnect"), logger.Status("FAIL"), logger.Importance(6), logger.Error(runErr))
-		} else {
-			cl.Warn("bot", "Long-poll stopped, reconnecting", logger.Block("Reconnect"), logger.Status("SKIP"), logger.Importance(5))
+		// does not permanently inflate recovery latency for the process lifetime.
+		if time.Since(runStarted) > stableRunThreshold {
+			backoff = initialLongPollBackoff
 		}
-
-		select {
-		case <-time.After(backoff):
-		case <-ctx.Done():
-			lp.Shutdown()
+		if runErr != nil {
+			cl.Warn("bot", "Long-poll error", logger.Block("Backoff"), logger.Status("FAIL"), logger.Importance(6), logger.Error(runErr), logger.Any("backoff", backoff.String()))
+		} else {
+			cl.Warn("bot", "Long-poll stopped, reconnecting", logger.Block("Backoff"), logger.Status("SKIP"), logger.Importance(5))
+		}
+		if !sleepCtx(ctx, backoff) {
 			return nil
 		}
-
-		backoff *= 2
-		if backoff > maxBackoff {
-			backoff = maxBackoff
-		}
+		backoff = growBackoff(backoff)
 	}
+}
+
+// newLongPoll returns a long-poll via the factory hook (tests) or the real constructor.
+func (b *Bot) newLongPoll() (*longpoll.LongPoll, error) {
+	if b.longPollFactory != nil {
+		return b.longPollFactory()
+	}
+	return longpoll.NewLongPoll(b.vk, longpoll.ReceiveAttachments|longpoll.ExtendedEvents)
+}
+
+// sleepCtx sleeps for d, interruptible by ctx; returns false if ctx fired during the wait.
+func sleepCtx(ctx context.Context, d time.Duration) bool {
+	select {
+	case <-time.After(d):
+		return true
+	case <-ctx.Done():
+		return false
+	}
+}
+
+// growBackoff returns the next exponential-backoff duration, capped at maxLongPollBackoff.
+func growBackoff(d time.Duration) time.Duration {
+	d *= 2
+	if d > maxLongPollBackoff {
+		return maxLongPollBackoff
+	}
+	return d
 }
 
 func (b *Bot) handle(m wrapper.NewMessage) {
@@ -275,6 +323,13 @@ func (s *vkSender) Send(peerID int, text string, keyboard *object.MessagesKeyboa
 // SetSender overrides the message sender for testing.
 func (b *Bot) SetSender(s Sender) {
 	b.sender = s
+}
+
+// - f: Factory returning a LongPoll and error; nil restores the production path (longpoll.NewLongPoll).
+
+// SetLongPollFactory overrides long-poll construction for testing; nil restores production.
+func (b *Bot) SetLongPollFactory(f func() (*longpoll.LongPoll, error)) {
+	b.longPollFactory = f
 }
 
 // HandleMessage simulates an incoming message for testing.

@@ -1,6 +1,6 @@
 #!/bin/sh
 # luci-app-olcrtc rpcd backend — POSIX shell ubus bridge
-# Exposes 15 methods for LuCI JS views. Reads/writes env, JSON configs,
+# Exposes 14 methods for LuCI JS views. Reads/writes env, JSON configs,
 # queries init.d, Clash API, nftables, conntrack, logread.
 
 set -e
@@ -63,7 +63,7 @@ _get_env_value() {
 list() {
     cat <<'JSONLIST'
 {
-"get_status":{"running":{"type":"boolean"},"is_client":{"type":"boolean"},"provider":{"type":"array"},"transport":{"type":"string"},"uptime_seconds":{"type":"int64"},"last_started":{"type":"string"},"last_stopped":{"type":"string"},"last_error":{"type":"string"},"last_exit_code":{"type":"int64"},"failures":{"type":"int64"},"crash_failures":{"type":"int64"},"dns_ping":{"type":"string"}},
+"get_status":{"running":{"type":"boolean"},"is_client":{"type":"boolean"},"vk_alive":{"type":"boolean"},"provider":{"type":"array"},"transport":{"type":"string"},"uptime_seconds":{"type":"int64"},"last_started":{"type":"string"},"last_stopped":{"type":"string"},"last_error":{"type":"string"},"last_exit_code":{"type":"int64"},"failures":{"type":"int64"},"crash_failures":{"type":"int64"},"dns_ping":{"type":"string"}},
 "get_env":{},
 "set_env":{"env":{"type":"object"},"restart":{"type":"boolean"}},
 "service_action":{"action":{"type":"string"}},
@@ -72,7 +72,6 @@ list() {
 "get_firewall":{},
 "get_logs":{"source":{"type":"string"},"lines":{"type":"int64"},"filter":{"type":"string"}},
 "ping_dns":{},
-"ping_tunnel":{},
 "get_whitelist":{},
 "set_whitelist":{"domains":{"type":"array"}},
 "set_provider":{"url":{"type":"string"}},
@@ -97,7 +96,6 @@ call() {
         get_firewall)    get_firewall ;;
         get_logs)        get_logs "$@" ;;
         ping_dns)        ping_dns ;;
-        ping_tunnel)     ping_tunnel ;;
         get_whitelist)   get_whitelist ;;
         set_whitelist)   set_whitelist "$@" ;;
         set_provider)    set_provider "$@" ;;
@@ -116,11 +114,12 @@ call() {
 # so the panel never hard-fails.
 #
 # Expected ubus call olcrtc-bot get_status output shape (normalized):
-#   {"running":<bool>,"is_client":<bool>,"provider":<["kind","room_id"]|null>,
+#   {"running":<bool>,"is_client":<bool>,"vk_alive":<bool>,"provider":<["kind","room_id"]|null>,
 #    "transport":"vp8channel","uptime_seconds":<int>,
 #    "last_started":"YYYY-MM-DD HH:MM:SS","last_stopped":"...",
 #    "last_error":"<str>","last_exit_code":<int|null>,
-#    "failures":<int>,"crash_failures":<int>,"dns_ping":"<str>"}
+#    "failures":<int>,"crash_failures":<int>,"dns_ping":"<str>",
+#    "tunnel_rtt_ms":<int|null>}
 get_status() {
     if command -v jsonfilter >/dev/null 2>&1; then
         _resp=""
@@ -189,15 +188,23 @@ get_status_from_go() {
     crash_failures=$(jsonfilter -s "$_resp" -e '@.crash_failures' 2>/dev/null || echo 0)
     [ -z "$crash_failures" ] && crash_failures=0
 
+    vk_alive=$(jsonfilter -s "$_resp" -e '@.vk_alive' 2>/dev/null || echo "false")
+    [ "$vk_alive" != "true" ] && vk_alive="false"
+
     dns_ping=$(jsonfilter -s "$_resp" -e '@.ping_dns' 2>/dev/null || echo "")
     if [ -z "$dns_ping" ]; then
         dns_ping=$(_measure_dns_ping)
     fi
 
-    printf '{"running":%s,"is_client":%s,"provider":%s,"transport":"%s","uptime_seconds":%d,' "$running" "$is_client" "$provider" "$transport" "$uptime_seconds"
+    tunnel_rtt_ms=$(jsonfilter -s "$_resp" -e '@.tunnel_rtt_ms' 2>/dev/null || echo "null")
+    if [ -z "$tunnel_rtt_ms" ]; then
+        tunnel_rtt_ms="null"
+    fi
+
+    printf '{"running":%s,"is_client":%s,"vk_alive":%s,"provider":%s,"transport":"%s","uptime_seconds":%d,' "$running" "$is_client" "$vk_alive" "$provider" "$transport" "$uptime_seconds"
     printf '"last_started":"%s","last_stopped":"%s",' "$(printf '%s' "$last_started" | sed 's/"/\\"/g')" "$(printf '%s' "$last_stopped" | sed 's/"/\\"/g')"
     printf '"last_error":"%s","last_exit_code":%s,' "$(printf '%s' "$last_error" | sed 's/"/\\"/g')" "$last_exit_code"
-    printf '"failures":%d,"crash_failures":%d,"dns_ping":"%s"}\n' "$failures" "$crash_failures" "$dns_ping"
+    printf '"failures":%d,"crash_failures":%d,"dns_ping":"%s","tunnel_rtt_ms":%s}\n' "$failures" "$crash_failures" "$dns_ping" "$tunnel_rtt_ms"
 }
 
 # Format an RFC3339 (or null/empty) timestamp as "YYYY-MM-DD HH:MM:SS".
@@ -305,6 +312,9 @@ get_status_syslog() {
     # Failure counts
     failures=0
     crash_failures=0
+    vk_alive="false"
+    /etc/init.d/dial-up running 2>/dev/null && vk_alive="true"
+
     _fcount=$(echo "$_log" | grep -c '"failures":' 2>/dev/null || true)
     _ccount=$(echo "$_log" | grep -c '"crashFailures":' 2>/dev/null || true)
     _fcount=$(($_fcount + 0)) 2>/dev/null || _fcount=0
@@ -321,10 +331,10 @@ get_status_syslog() {
         [ "$_elapsed" -gt 0 ] 2>/dev/null && dns_ping="${_elapsed}ms" || dns_ping="<1ms"
     fi
 
-    printf '{"running":%s,"is_client":%s,"provider":%s,"transport":"%s","uptime_seconds":%d,' "$running" "$is_client" "$provider" "$transport" "$uptime_seconds"
+    printf '{"running":%s,"is_client":%s,"vk_alive":%s,"provider":%s,"transport":"%s","uptime_seconds":%d,' "$running" "$is_client" "$vk_alive" "$provider" "$transport" "$uptime_seconds"
     printf '"last_started":"%s","last_stopped":"%s",' "$last_started" "$last_stopped"
     printf '"last_error":"%s","last_exit_code":%s,' "$(printf '%s' "$last_error" | sed 's/"/\\"/g')" "$last_exit_code"
-    printf '"failures":%d,"crash_failures":%d,"dns_ping":"%s"}\n' "$failures" "$crash_failures" "$dns_ping"
+    printf '"failures":%d,"crash_failures":%d,"dns_ping":"%s","tunnel_rtt_ms":null}\n' "$failures" "$crash_failures" "$dns_ping"
 }
 
 # ── get_env ──────────────────────────────────────────────────
@@ -455,26 +465,45 @@ get_singbox() {
 }
 
 # ── set_route ────────────────────────────────────────────────
+# Authoritative path: PUT mode through the Go bot's /route endpoint
+# (single source of truth) so the manualDirect override flag is set
+# and the loop respects it permanently. Returns an error when the
+# bot's status endpoint is unreachable — NO direct Clash fallback,
+# because the Clash API bypass would leave manualDirect unset and
+# the auto-promote loop (10s tick) would revert the change.
 set_route() {
     _stdin=$(cat)
     _mode=$(echo "$_stdin" | grep -o '"mode":"[^"]*"' | cut -d: -f2 | tr -d '"')
 
     case "$_mode" in
         proxy|direct)
-            # PUT via wget (if available) or curl
-            _data="{\"name\":\"$_mode\"}"
+            _data="{\"mode\":\"$_mode\"}"
+
             if command -v curl >/dev/null 2>&1; then
-                curl -s -X PUT -d "$_data" \
+                _resp=$(curl -s -X PUT -d "$_data" \
                     -H "Content-Type: application/json" \
-                    --max-time 3 "http://127.0.0.1:9090/proxies/route-select" \
-                    2>/dev/null || true
-            else
-                wget -q --post-data="$_data" \
+                    --max-time 3 "http://127.0.0.1:${STATUS_PORT}/route" 2>/dev/null) || true
+            elif command -v wget >/dev/null 2>&1; then
+                # wget on OpenWrt may not support --method=PUT; POST works (handler accepts both).
+                _resp=$(wget -q -O - --post-data="$_data" \
                     --header="Content-Type: application/json" \
-                    -O /dev/null "http://127.0.0.1:9090/proxies/route-select" \
-                    --method=PUT 2>/dev/null || true
+                    --timeout=3 "http://127.0.0.1:${STATUS_PORT}/route" 2>/dev/null) || true
+            else
+                printf '{"error":"neither curl nor wget available"}\n'
+                return
             fi
-            printf '{"ok":true}\n'
+
+            _ok=$(echo "$_resp" | grep -o '"ok"[[:space:]]*:[[:space:]]*true' || echo "")
+            if [ -n "$_ok" ]; then
+                printf '{"ok":true}\n'
+            else
+                _err=$(echo "$_resp" | grep -o '"error":"[^"]*"' | cut -d: -f2- | tr -d '"')
+                if [ -n "$_err" ]; then
+                    printf '{"error":"%s"}\n' "$_err"
+                else
+                    printf '{"error":"bot endpoint unreachable on 127.0.0.1:%s/route"}\n' "$STATUS_PORT"
+                fi
+            fi
             ;;
         *)
             printf '{"error":"invalid mode: %s"}\n' "$_mode"
@@ -582,48 +611,6 @@ ping_dns() {
     else
         printf '{"error":"timeout"}\n'
     fi
-}
-
-# ── ping_tunnel ──────────────────────────────────────────────
-# Measures RTT through the olcRTC tunnel via the Clash API delay-test
-# endpoint (GET /proxies/proxy/delay). sing-box routes an HTTP request
-# through the "proxy" outbound (→ olcRTC SOCKS5 on 127.0.0.1:1080)
-# and returns {"delay":<ms>}.
-#
-# Uses raw HTTP over nc to bypass busybox wget's URL-encoding issues
-# with query parameters. Falls back to wget/curl if nc is unavailable.
-# On failure, surfaces the raw Clash API response for diagnosis.
-ping_tunnel() {
-    _path='/proxies/proxy/delay?url=http%3A%2F%2Fcp.cloudflare.com&timeout=5000'
-
-    # |>B:ClashDelayTest
-    _resp=""
-    if command -v nc >/dev/null 2>&1; then
-        _resp=$({ printf 'GET %s HTTP/1.0\r\nHost: 127.0.0.1\r\nConnection: close\r\n\r\n' "$_path"; sleep 6; } | nc 127.0.0.1 9090 2>/dev/null) || _resp=""
-        # Strip HTTP headers — keep only the body (last non-empty line that looks like JSON)
-        _resp=$(echo "$_resp" | grep '^{.*}$' | tail -1)
-    fi
-    if [ -z "$_resp" ]; then
-        _resp=$(wget -q -O - --timeout=8 "http://127.0.0.1:9090${_path}" 2>/dev/null) || _resp=""
-    fi
-    if [ -z "$_resp" ] && command -v curl >/dev/null 2>&1; then
-        _resp=$(curl -s --max-time 8 "http://127.0.0.1:9090${_path}" 2>/dev/null) || _resp=""
-    fi
-
-    if [ -n "$_resp" ]; then
-        _delay=$(echo "$_resp" | grep -o '"delay" *: *[0-9]*' | grep -o '[0-9]*$')
-        if [ -n "$_delay" ] && [ "$_delay" -gt 0 ] 2>/dev/null; then
-            printf '{"rtt_ms":%d}\n' "$_delay"
-            return
-        fi
-        # sing-box responded but no valid delay — include raw response for diagnosis
-        _esc=$(printf '%s' "$_resp" | sed 's/"/\\"/g')
-        printf '{"error":"delay test failed: %s"}\n' "$_esc"
-        return
-    fi
-    # <|B:ClashDelayTest
-
-    printf '{"error":"tunnel unreachable"}\n'
 }
 
 # ── get_whitelist ────────────────────────────────────────────

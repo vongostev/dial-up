@@ -9,8 +9,7 @@
 					"get_singbox",
 					"get_firewall",
 					"get_logs",
-					"ping_dns",
-					"ping_tunnel",
+				"ping_dns",
 				"get_whitelist",
 				"generate_key",
 				"test_socks_proxy"

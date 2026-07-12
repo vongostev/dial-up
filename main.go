@@ -61,7 +61,7 @@ func main() {
 
 	// A bind failure (busy port) is logged and skipped: the panel degrades to the rpcd syslog path.
 	statusAddr := "127.0.0.1:" + cfg.StatusPort
-	if err := statusapi.New(statusAddr, ctrl.Status, l).Start(ctx); err != nil {
+	if err := statusapi.New(statusAddr, ctrl.Status, ctrl.SetRoute, l).Start(ctx); err != nil {
 		cl.Warn("main", "Status endpoint not started (panel will use syslog fallback)", logger.Block("StatusEndpoint"), logger.Status("SKIP"), logger.Importance(6), logger.Error(err), logger.String("addr", statusAddr))
 	} else {
 		cl.Info("main", "Status endpoint started", logger.Block("StatusEndpoint"), logger.Status("OK"), logger.Importance(5), logger.String("addr", statusAddr))
