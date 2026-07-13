@@ -1,4 +1,5 @@
 /*
+[2026-07-13] :: 🛡️ :: Added sync.Once guard to Stop() to prevent panic on double close
 [2026-07-12] :: 🚀 :: Added hasRTT/rttMs to netSnapshot; refresh() calls singbox.DelayTest() when sbStatus.Alive to cache tunnel RTT
 [2026-07-10] :: 🛡️ :: Added Stop() method with dedicated stop channel — Controller.Stop() now explicitly stops the cache goroutine without relying on ctx cancellation alone; moved initial refresh into the background goroutine so Start() returns immediately; SetRoute triggers an immediate refresh so /s reflects route changes promptly
 [2026-07-10] :: 🚀 :: Initial netCache: background-refreshing diagnostics cache (30s interval, atomic.Pointer for lock-free reads)
@@ -8,6 +9,7 @@ package controller
 
 import (
 	"context"
+	"sync"
 	"sync/atomic"
 	"time"
 
@@ -34,6 +36,7 @@ type netCache struct {
 	isClient bool
 	l        logger.Logger
 	stop     chan struct{}
+	stopOnce sync.Once
 }
 
 // newNetCache creates a netCache that will refresh PingDNS and sing-box status.
@@ -52,7 +55,7 @@ func (nc *netCache) Start(ctx context.Context) {
 
 	go func() {
 		cl.Debug("controller", "Performing initial diagnostics refresh", logger.Block("InitialRefresh"), logger.Status("ATTEMPT"), logger.Importance(4))
-		nc.refresh()
+		nc.refresh(ctx)
 		cl.Debug("controller", "Initial diagnostics refresh complete", logger.Block("InitialRefresh"), logger.Status("OK"), logger.Importance(4))
 
 		ticker := time.NewTicker(netCacheInterval)
@@ -61,7 +64,7 @@ func (nc *netCache) Start(ctx context.Context) {
 		for {
 			select {
 			case <-ticker.C:
-				nc.refresh()
+				nc.refresh(ctx)
 			case <-nc.stop:
 				cl.Info("controller", "Diagnostics cache goroutine exiting via Stop", logger.Block("BackgroundRefresh"), logger.Status("OK"), logger.Importance(5))
 				return
@@ -75,15 +78,17 @@ func (nc *netCache) Start(ctx context.Context) {
 
 // Stop signals the background refresh goroutine to exit.
 func (nc *netCache) Stop() {
-	close(nc.stop)
+	nc.stopOnce.Do(func() {
+		close(nc.stop)
+	})
 }
 
 // refresh collects fresh network diagnostics and stores them atomically.
-func (nc *netCache) refresh() {
+func (nc *netCache) refresh(ctx context.Context) {
 	cl := nc.l.With(logger.Function("netCache.refresh"))
 
 	snap := netSnapshot{
-		pingDNS: PingDNS(),
+		pingDNS: PingDNS(ctx),
 	}
 
 	if nc.isClient && nc.sb != nil {

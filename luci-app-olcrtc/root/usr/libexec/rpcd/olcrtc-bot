@@ -130,7 +130,7 @@ get_status() {
             _resp=$(curl -s --max-time 2 "http://127.0.0.1:${STATUS_PORT}/status" 2>/dev/null || true)
         fi
         if [ -n "$_resp" ]; then
-            _hp=$(jsonfilter -s "$_resp" -e '@.has_process' 2>/dev/null || echo "")
+            _hp=$(jsonfilter -s "$_resp" -e '@.tunnel_alive' 2>/dev/null || echo "")
             if [ -n "$_hp" ]; then
                 get_status_from_go "$_resp"
                 return
@@ -144,7 +144,7 @@ get_status() {
 get_status_from_go() {
     _resp="$1"
 
-    _hp=$(jsonfilter -s "$_resp" -e '@.has_process' 2>/dev/null || echo "false")
+    _hp=$(jsonfilter -s "$_resp" -e '@.tunnel_alive' 2>/dev/null || echo "false")
     running="false"
     [ "$_hp" = "true" ] && running="true"
 

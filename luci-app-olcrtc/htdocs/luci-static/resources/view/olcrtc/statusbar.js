@@ -166,9 +166,5 @@ return baseclass.extend({
 				self.node = fresh;
 			}
 		}).catch(function () {});
-	},
-
-	renderStatusStrip: function (status, singbox, env) {
-		return renderStatusStrip(status, singbox, env);
 	}
 });

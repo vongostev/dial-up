@@ -16,7 +16,7 @@ import (
 )
 
 func TestPingDNSReturnsNonEmpty(t *testing.T) {
-	result := controller.PingDNS()
+	result := controller.PingDNS(t.Context())
 	if result == "" {
 		t.Fatal("PingDNS() returned empty string, expected RTT or error text")
 	}
@@ -24,7 +24,7 @@ func TestPingDNSReturnsNonEmpty(t *testing.T) {
 }
 
 func TestPingDNSResultFormat(t *testing.T) {
-	result := controller.PingDNS()
+	result := controller.PingDNS(t.Context())
 	validPatterns := []string{"ms", "µs", "0s", "timeout", "connection refused", "unavailable"}
 
 	found := false

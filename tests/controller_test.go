@@ -120,9 +120,6 @@ func TestControllerStatusFields(t *testing.T) {
 }
 
 func TestRenderStatus(t *testing.T) {
-	errCode := 1
-	sbDown := false
-
 	tests := []struct {
 		name   string
 		status controller.Status
@@ -148,12 +145,11 @@ func TestRenderStatus(t *testing.T) {
 		{
 			name: "Client working happy path",
 			status: func() controller.Status {
-				alive := true
 				return controller.Status{
 					VkAlive:      true,
-					HasProcess:   true,
+					TunnelAlive:  true,
 					PingDNS:      "8ms",
-					SingBoxAlive: &alive,
+					SingBoxAlive: new(true),
 					SingBoxRoute: "proxy",
 				}
 			}(),
@@ -169,12 +165,12 @@ func TestRenderStatus(t *testing.T) {
 			name: "Stopped with error and network",
 			status: controller.Status{
 				VkAlive:      false,
-				HasProcess:   false,
+				TunnelAlive:  false,
 				Provider:     &provider.Provider{Kind: "tm", RoomID: "456"},
-				LastExitCode: &errCode,
+				LastExitCode: new(1),
 				LastError:    "auth failed",
 				PingDNS:      "15ms",
-				SingBoxAlive: &sbDown,
+				SingBoxAlive: new(false),
 				SingBoxRoute: "",
 			},
 			checks: []string{
@@ -191,12 +187,11 @@ func TestRenderStatus(t *testing.T) {
 		{
 			name: "client with sing-box dead",
 			status: func() controller.Status {
-				dead := false
 				return controller.Status{
 					VkAlive:      true,
-					HasProcess:   true,
+					TunnelAlive:  true,
 					PingDNS:      "timeout",
-					SingBoxAlive: &dead,
+					SingBoxAlive: new(false),
 					SingBoxRoute: "",
 				}
 			}(),
@@ -211,12 +206,11 @@ func TestRenderStatus(t *testing.T) {
 		{
 			name: "client with manual direct lock",
 			status: func() controller.Status {
-				alive := true
 				return controller.Status{
 					VkAlive:      true,
-					HasProcess:   true,
+					TunnelAlive:  true,
 					PingDNS:      "8ms",
-					SingBoxAlive: &alive,
+					SingBoxAlive: new(true),
 					SingBoxRoute: "direct",
 					ManualDirect: true,
 				}
@@ -320,7 +314,7 @@ func TestControllerCapturesSubprocessError(t *testing.T) {
 	var s controller.Status
 	for time.Now().Before(deadline) {
 		s = ctrl.Status()
-		if !s.HasProcess && s.LastExitCode != nil && s.LastError != "" {
+		if !s.TunnelAlive && s.LastExitCode != nil && s.LastError != "" {
 			break
 		}
 		time.Sleep(50 * time.Millisecond)

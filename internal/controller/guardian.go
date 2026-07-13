@@ -1,4 +1,5 @@
 /*
+[2026-07-13] :: 🛡️ :: Added sync.Once guard to Stop() to prevent panic on double close
 [2026-07-10] :: 🚀 :: Initial tproxyGuardian: 10s health watchdog coupling nft tproxy chain to sing-box liveness (flush/reload) + proxy-mode demote on dead :1080
 */
 
@@ -6,6 +7,7 @@ package controller
 
 import (
 	"context"
+	"sync"
 	"time"
 
 	"dial-up/internal/domain/logger"
@@ -31,13 +33,14 @@ type tproxyGuardian struct {
 	l         logger.Logger
 	downSince time.Time
 	flushed   bool
-	onDemote  func()
+	onDemote  func(context.Context)
 	socksAddr string
 	stop      chan struct{}
+	stopOnce  sync.Once
 }
 
 // newTproxyGuardian creates a tproxyGuardian with the default interval, threshold, and SOCKS address.
-func newTproxyGuardian(sb singbox.Controller, fw firewall.Manager, l logger.Logger, onDemote func()) *tproxyGuardian {
+func newTproxyGuardian(sb singbox.Controller, fw firewall.Manager, l logger.Logger, onDemote func(context.Context)) *tproxyGuardian {
 	return &tproxyGuardian{
 		sb:        sb,
 		fw:        fw,
@@ -86,7 +89,9 @@ func (g *tproxyGuardian) Start(ctx context.Context) {
 
 // Stop signals the background watchdog goroutine to exit.
 func (g *tproxyGuardian) Stop() {
-	close(g.stop)
+	g.stopOnce.Do(func() {
+		close(g.stop)
+	})
 }
 
 // check performs one health-coupling tick: flush/restore the tproxy chain and demote on dead SOCKS.
@@ -135,7 +140,7 @@ func (g *tproxyGuardian) check(ctx context.Context) {
 				cl.Info("controller", "Selector demoted to direct", logger.Block("PortCheckDemote"), logger.Status("OK"), logger.Importance(7))
 			}
 			if g.onDemote != nil {
-				g.onDemote()
+				g.onDemote(ctx)
 			}
 		} else {
 			cl.Debug("controller", "olcrtc SOCKS port alive, no demotion needed", logger.Block("PortCheckDemote"), logger.Status("OK"), logger.Importance(4))

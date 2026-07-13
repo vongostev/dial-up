@@ -19,14 +19,13 @@ func RenderStatus(s Status) string {
 	b.WriteString("🤖 Статус\n")
 	b.WriteString("━━━━━━━━━━━━━━━━\n")
 
-	// Процесс
 	if s.VkAlive {
 		b.WriteString("🟢 Бот: в сети\n")
 	} else {
 		b.WriteString("🔴 Бот: не в сети\n")
 	}
 
-	if s.HasProcess {
+	if s.TunnelAlive {
 		b.WriteString("🟢 Тоннель: работает\n")
 	} else {
 		b.WriteString("🔴 Тоннель: остановлен\n")

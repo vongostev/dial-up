@@ -16,7 +16,6 @@ return view.extend({
         var statusbar = data[0];
         var status = data[1] || {};
         var isClient = status.is_client === true;
-        var self = this;
 
         var container = E('div', {'id': 'olcrtc-network'});
         statusbar.mount(container);

@@ -173,7 +173,7 @@ func TestGuardianProxyPortClosedDemotes(t *testing.T) {
 	sb := &fakeSB{alive: true, route: singbox.ModeProxy}
 	fw := &fakeFW{}
 	demoted := false
-	g := newTproxyGuardian(sb, fw, l, func() { demoted = true })
+	g := newTproxyGuardian(sb, fw, l, func(_ context.Context) { demoted = true })
 	g.socksAddr = closedAddr
 
 	g.check(context.Background())

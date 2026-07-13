@@ -131,7 +131,6 @@ return view.extend({
 	},
 
 	_renderMetrics: function (status) {
-		var self = this;
 		var container = this._metricsContainer;
 		while (container.firstChild) container.removeChild(container.firstChild);
 
@@ -208,7 +207,6 @@ return view.extend({
 	},
 
 	_buildCrypto: function () {
-		var self = this;
 		var val = (this._env && this._env.OLCRTC_KEY) ? this._env.OLCRTC_KEY : '';
 		var pass = E('input', {
 			'type': 'password', 'id': 'env-OLCRTC_KEY', 'class': 'cbi-input-text',

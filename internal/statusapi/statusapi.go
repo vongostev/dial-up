@@ -1,4 +1,5 @@
 /*
+[2026-07-13] :: 🛡️ :: Added io.LimitReader(r.Body, 1024) to /route decode; sanitised JSON error responses via json.NewEncoder.Encode
 [2026-07-12] :: 🚀 :: Added PUT/POST /route handler with routeFn wiring; New() now accepts routeFn func(string)error for single-source-of-truth route switching (sets manualDirect flag on Controller)
 [2026-07-09] :: 🚀 :: Initial statusapi: loopback GET /status (controller.Status JSON) + /healthz, graceful ctx shutdown, non-fatal bind
 */
@@ -10,6 +11,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net"
 	"net/http"
 	"time"
@@ -118,10 +120,10 @@ func (s *Server) handler(w http.ResponseWriter, r *http.Request) {
 		var body struct {
 			Mode string `json:"mode"`
 		}
-		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		if err := json.NewDecoder(io.LimitReader(r.Body, 1024)).Decode(&body); err != nil {
 			w.Header().Set("Content-Type", "application/json")
 			w.WriteHeader(http.StatusBadRequest)
-			_, _ = w.Write([]byte(`{"error":"invalid JSON: ` + err.Error() + `"}`))
+			_ = json.NewEncoder(w).Encode(struct{ Error string }{Error: "invalid JSON: " + err.Error()})
 			return
 		}
 
@@ -136,7 +138,7 @@ func (s *Server) handler(w http.ResponseWriter, r *http.Request) {
 			cl.Error(logCategory, "Route set failed", logger.Block("RouteSet"), logger.Status("FAIL"), logger.Importance(7), logger.Error(err), logger.String("mode", body.Mode))
 			w.Header().Set("Content-Type", "application/json")
 			w.WriteHeader(http.StatusInternalServerError)
-			_, _ = w.Write([]byte(`{"error":"` + err.Error() + `"}`))
+			_ = json.NewEncoder(w).Encode(struct{ Error string }{Error: err.Error()})
 			return
 		}
 

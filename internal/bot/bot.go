@@ -1,4 +1,6 @@
 /*
+[2026-07-14] :: 🐛 :: Fixed Ctrl+C hang: lp.Run() (vksdk) blocks indefinitely without checking ctx; added shutdown watcher goroutine that calls lp.Shutdown() on ctx cancellation so the process exits promptly on SIGINT/SIGTERM instead of hanging until the long-poll connection drops
+[2026-07-13] :: 🐛 :: Fixed /m proxy|direct routing: changed switch to prefix matching + parses m.Text; renamed handleSetRoute→handleSetRouteCmd; removed dead log line
 [2026-07-12] :: 🐛 :: Fixed cold-boot dead-bot: longpoll.NewLongPoll construction (live DNS+HTTP call) moved inside Run() reconnect loop so boot-time DNS SERVFAIL is retried with backoff instead of returning fatally and exhausting procd respawn. Added stable-run (>30s) backoff reset and an injectable longPollFactory hook for deterministic tests.
 [2026-07-07] :: 🚀 :: Added mode-proxy/mode-direct button dispatch via handleSetRouteMode; buildMenuKeyboard now receives isClient for conditional second row
 [2026-07-07] :: 🚀 :: Added ClearProvider() to Controller interface; handleStop ("/n" / Stop button) now routes through ClearProvider so stop means forget — the running tunnel is killed AND last_provider.json is deleted (no auto-reconnect after reboot)
@@ -126,7 +128,19 @@ func (b *Bot) Run(ctx context.Context) error {
 
 		runStarted := time.Now()
 		b.controller.SetVkAlive(true)
+		// lp.Run() (vksdk) does not accept a context and blocks until Shutdown() is
+		// called or an error occurs. A shutdown watcher goroutine calls lp.Shutdown() when ctx
+		// is cancelled, allowing graceful shutdown on Ctrl+C/SIGTERM instead of hanging.
+		done := make(chan struct{})
+		go func() {
+			select {
+			case <-ctx.Done():
+				lp.Shutdown()
+			case <-done:
+			}
+		}()
 		runErr := lp.Run()
+		close(done)
 		b.controller.SetVkAlive(false)
 		lp.Shutdown()
 
@@ -197,20 +211,30 @@ func (b *Bot) handle(m wrapper.NewMessage) {
 	var responseText string
 	var kb *object.MessagesKeyboard
 
-	switch text {
-	case "/menu", "/start":
+	switch {
+	case text == "/menu" || text == "/start":
 		responseText = "Для управления используйте кнопки Status / Stop / Restart. Для подключения к комнате отправьте URL."
 		kb = buildMenuKeyboard(b.cfg.IsClient)
 		cl.Info("bot", "Menu keyboard attached", logger.Block("CommandDispatch"), logger.Status("OK"), logger.Importance(5))
-	case "/s":
+	case text == "/s":
 		responseText = b.handleStatus()
-	case "/n":
+	case text == "/n":
 		responseText = b.handleStop()
-	case "/r":
+	case text == "/r":
 		responseText = b.handleRestart()
-	case "/m":
+	case strings.HasPrefix(text, "/m"):
 		if b.cfg.IsClient {
-			responseText = b.handleSetRoute(text)
+			parts := strings.Fields(m.Text)
+			if len(parts) == 2 {
+				mode := strings.ToLower(parts[1])
+				if mode == singbox.ModeProxy || mode == singbox.ModeDirect {
+					responseText = b.handleSetRouteMode(mode)
+				} else {
+					responseText = "Некорректный режим. Используй proxy или direct"
+				}
+			} else {
+				responseText = b.handleSetRouteCmd(text)
+			}
 		}
 	default:
 		if action, ok := resolveAction(text); ok {
@@ -271,8 +295,7 @@ func (b *Bot) handleRestart() string {
 	return "Ok"
 }
 
-func (b *Bot) handleSetRoute(text string) string {
-	b.l.Info("bot", "")
+func (b *Bot) handleSetRouteCmd(text string) string {
 	parts := strings.Fields(text)
 	if len(parts) != 2 {
 		return "Usage: /m proxy | /m direct"

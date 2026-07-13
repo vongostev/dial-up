@@ -14,13 +14,13 @@ import (
 
 // PingDNS measures internet connectivity via TCP connect to 9.9.9.9:53 (Quad9 DNS).
 // Returns RTT as a human-readable string on success, or an error description on failure.
-func PingDNS() string {
+func PingDNS(ctx context.Context) string {
 	const target = "9.9.9.9:53"
 	const timeout = 2 * time.Second
 
 	start := time.Now()
 	dialer := net.Dialer{Timeout: timeout}
-	conn, err := dialer.DialContext(context.Background(), "tcp", target)
+	conn, err := dialer.DialContext(ctx, "tcp", target)
 	rtt := time.Since(start)
 
 	if err != nil {

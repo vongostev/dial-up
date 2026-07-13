@@ -1,4 +1,5 @@
 /*
+[2026-07-13] :: 🛡️ :: Replaced errors.AsType with standard errors.As (pre-1.21 two-arg form); replaced 3x time.After with time.NewTimer+Stop for timer leak protection (LoopWait, Backoff, waitCmd stream wait)
 [2026-07-12] :: 🚀 :: Added TunnelRTTMs *int field to Status; snapshot() populates it from netCache.get() when hasRTT is true
 [2026-07-12] :: 🚀 :: Added manualDirect flag: SetRoute toggles it; loop promote is gated by !c.manualDirect; snapshot exposes it in Status.ManualDirect; crash/guardian demotes never touch the flag
 [2026-07-10] :: 🚀 :: Added tproxyGuardian wiring: New() creates it (client-mode only) with firewall.New + netCache.refresh callback; Start() starts it after netCache; Stop() stops it before process kill — couples nft tproxy chain to sing-box liveness (flush/reload) and demotes selector on dead olcrtc SOCKS :1080
@@ -43,7 +44,7 @@ const maxFailures = 5
 
 // Status is an immutable snapshot of controller state for status reporting.
 type Status struct {
-	HasProcess     bool               `json:"has_process"`
+	TunnelAlive    bool               `json:"tunnel_alive"`
 	Provider       *provider.Provider `json:"provider"`
 	ProcessStarted *time.Time         `json:"process_started"`
 	ProcessStopped *time.Time         `json:"process_stopped"`
@@ -244,7 +245,7 @@ func (c *Controller) SetRoute(mode string) error {
 	if err := c.singbox.SetRoute(mode); err != nil {
 		return fmt.Errorf("singbox: %w", err)
 	}
-	go c.netCache.refresh()
+	go c.netCache.refresh(context.Background())
 	return nil
 }
 
@@ -275,7 +276,7 @@ func (c *Controller) calcBackoff() time.Duration {
 func (c *Controller) snapshot() Status {
 	c.mu.Lock()
 	s := Status{
-		HasProcess:     c.cmd != nil,
+		TunnelAlive:    c.cmd != nil,
 		ProcessStarted: c.startedAt,
 		ProcessStopped: c.stoppedAt,
 		LastExitCode:   c.lastExitCode,
@@ -295,13 +296,11 @@ func (c *Controller) snapshot() Status {
 	s.PingDNS = ns.pingDNS
 
 	if c.cfg.IsClient && ns.hasSingBox {
-		alive := ns.sbAlive
-		s.SingBoxAlive = &alive
+		s.SingBoxAlive = new(ns.sbAlive)
 		s.SingBoxRoute = ns.sbRoute
 
 		if ns.hasRTT {
-			v := ns.rttMs
-			s.TunnelRTTMs = &v
+			s.TunnelRTTMs = new(ns.rttMs)
 		}
 	}
 
@@ -348,10 +347,10 @@ func (c *Controller) loop(ctx context.Context) {
 			// for up to 60s. Now mutex is released BEFORE select — SetProvider and waitCmd can signal freely.
 			c.mu.Lock()
 
-			hasProcess := c.cmd != nil
+			tunnelAlive := c.cmd != nil
 			wait := idleTimeout
 
-			if hasProcess {
+			if tunnelAlive {
 				if c.restarting {
 					cl.Info("controller", "Restarting: terminating process", logger.Block("LoopTick"), logger.Status("ATTEMPT"), logger.Importance(6))
 					if c.cmd.Process != nil {
@@ -488,13 +487,15 @@ func (c *Controller) loop(ctx context.Context) {
 				RemoveLastProvider(c.cfg.LastProviderFile, c.l)
 			}
 
+			lwtmr := time.NewTimer(wait)
+			defer lwtmr.Stop()
 			select {
 			case <-c.done:
 				return
 			case <-ctx.Done():
 				return
 			case <-c.sig:
-			case <-time.After(wait):
+			case <-lwtmr.C:
 			}
 		}()
 
@@ -515,8 +516,10 @@ func (c *Controller) loop(ctx context.Context) {
 			c.mu.Unlock()
 			if backoff > 0 {
 				cl.Warn("controller", "Backing off after failure", logger.Block("Backoff"), logger.Status("SKIP"), logger.Importance(6), logger.Any("backoff", backoff.String()), logger.Any("failures", fails))
+				botmr := time.NewTimer(backoff)
+				defer botmr.Stop()
 				select {
-				case <-time.After(backoff):
+				case <-botmr.C:
 				case <-c.done:
 					return
 				case <-ctx.Done():
@@ -544,9 +547,11 @@ func (c *Controller) waitCmd(cmd *exec.Cmd) {
 		// calls Done(). Bound the wait so a stuck pipe cannot freeze the loop.
 		done := make(chan struct{})
 		go func() { wg.Wait(); close(done) }()
+		wtmr := time.NewTimer(2 * time.Second)
+		defer wtmr.Stop()
 		select {
 		case <-done:
-		case <-time.After(2 * time.Second):
+		case <-wtmr.C:
 			cl.Warn("controller", "Timed out waiting for subprocess output stream", logger.Block("ExitEval"), logger.Status("SKIP"), logger.Importance(6))
 		}
 	}

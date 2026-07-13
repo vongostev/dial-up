@@ -57,7 +57,7 @@ func doGet(t *testing.T, url string) (int, string, string) {
 
 func TestStatusHandlerNilProvider(t *testing.T) {
 	want := controller.Status{
-		HasProcess:    true,
+		TunnelAlive:   true,
 		Failures:      2,
 		CrashFailures: 1,
 		LastError:     "boom",
@@ -82,15 +82,15 @@ func TestStatusHandlerNilProvider(t *testing.T) {
 	if got.Provider != nil {
 		t.Errorf("provider = %v, want nil", got.Provider)
 	}
-	if got.HasProcess != want.HasProcess || got.Failures != want.Failures || got.CrashFailures != want.CrashFailures || got.LastError != want.LastError {
+	if got.TunnelAlive != want.TunnelAlive || got.Failures != want.Failures || got.CrashFailures != want.CrashFailures || got.LastError != want.LastError {
 		t.Errorf("decoded status mismatch: got %+v, want %+v", got, want)
 	}
 }
 
 func TestStatusHandlerSetProvider(t *testing.T) {
 	want := controller.Status{
-		HasProcess: false,
-		Provider:   &provider.Provider{Kind: provider.ProviderWbStream, RoomID: "019f33d5-c73d-7a09-ba85-b874bd1fceab"},
+		TunnelAlive: false,
+		Provider:    &provider.Provider{Kind: provider.ProviderWbStream, RoomID: "019f33d5-c73d-7a09-ba85-b874bd1fceab"},
 	}
 	s, cancel := newStatusServer(t, want, nil)
 	defer cancel()

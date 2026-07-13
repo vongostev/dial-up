@@ -167,7 +167,6 @@ return view.extend({
 		var self = this;
 		var src = this._currentSource;
 		var lines = this._currentLines;
-		var filter = this._currentFilter;
 
 		if (src === 'all') {
 			var defs = [
@@ -203,7 +202,6 @@ return view.extend({
 	},
 
 	_doFetch: function () {
-		var self = this;
 		this._fetch().then(function (lines) {
 			var el = document.getElementById('log-output');
 			if (el) {
