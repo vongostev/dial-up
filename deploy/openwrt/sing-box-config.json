@@ -6,8 +6,7 @@
   "dns": {
     "servers": [
       { "type": "local", "tag": "local" },
-      { "type": "udp", "tag": "yandex", "server": "77.88.8.8" },
-      { "type": "udp", "tag": "quad9", "server": "9.9.9.9" }
+      { "type": "udp", "tag": "yandex", "server": "77.88.8.8" }
     ],
     "rules": [
       {
@@ -34,7 +33,8 @@
     },
     {
       "type": "direct",
-      "tag": "direct"
+      "tag": "direct",
+      "domain_resolver": "yandex"
     },
     {
       "type": "selector",
@@ -44,7 +44,6 @@
     }
   ],
   "route": {
-    "default_domain_resolver": "yandex",
     "rule_set": [
       {
         "tag": "whitelist",
@@ -55,7 +54,9 @@
     ],
     "rules": [
       {
-        "action": "sniff"
+        "action": "sniff",
+        "timeout": "300ms",
+        "override_destination": true
       },
       {
         "domain_suffix": ["local", ".lan", ".internal"],

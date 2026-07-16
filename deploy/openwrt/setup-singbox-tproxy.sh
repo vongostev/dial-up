@@ -60,7 +60,7 @@ cat > /etc/sing-box/tproxy.nft <<'EOF'
 chain singbox_tproxy {
   type filter hook prerouting priority mangle; policy accept;
   iifname "br-lan" ip daddr { 127.0.0.0/8, 10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16 } counter accept
-  iifname "br-lan" meta nfproto ipv4 udp dport { 67, 68 } counter accept
+  iifname "br-lan" meta nfproto ipv4 udp dport { 53, 67, 68 } counter accept
   iifname "br-lan" meta nfproto ipv4 meta l4proto { tcp, udp } counter meta mark set 0x1 tproxy ip to 127.0.0.1:2080 accept
 }
 EOF

@@ -10,7 +10,7 @@ set -e
 TYPE="${1:-client}"
 HOST="${2:-root@192.168.1.1}"
 REPO_DIR="$(cd "$(dirname "$0")" && pwd)"
-SSH_OPTS="-o LogLevel=ERROR -o ConnectTimeout=5 -o StrictHostKeyChecking=no"
+SSH_OPTS="-o LogLevel=ERROR -o ConnectTimeout=5 -o StrictHostKeyChecking=no -o Port=22"
 
 BINARY="$REPO_DIR/bin/dial-up-linux-arm64"
 OLCRTC_BINARY="$REPO_DIR/bin/olcrtc-linux-arm64"

@@ -7,7 +7,7 @@ crypto:
   key: "$olcrtc_key"
 net:
   transport: vp8channel
-  dns: "9.9.9.9:53"
+  dns: "127.0.0.1:53"
 $socks_proxy
 data: data
 debug: false
