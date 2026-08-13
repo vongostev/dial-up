@@ -124,6 +124,7 @@ type Config struct {
     VKToken, OlcrtcKey     string   // обязательные
     IsClient               bool     // true=клиент, false=сервер
     SocksProxyAddr/Port    string   // upstream SOCKS5 (только сервер)
+    NetDNS                 string   // выходной DNS сервера (default: 127.0.0.1:53)
     StatusPort             string   // HTTP-статус (default: 9091)
     // ... остальные поля
 }

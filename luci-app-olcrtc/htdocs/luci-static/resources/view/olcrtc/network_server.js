@@ -24,6 +24,7 @@ return baseclass.extend({
         var curPort = env.SOCKS_PROXY_PORT || '';
         var curUser = env.SOCKS_PROXY_USER || '';
         var curPass = env.SOCKS_PROXY_PASS || '';
+        var curDns = env.NET_DNS || '127.0.0.1:53';
 
         var section = E('div', {'class': 'cbi-section'});
         section.appendChild(E('h3', {}, [_('Upstream SOCKS5 Egress')]));
@@ -74,6 +75,12 @@ return baseclass.extend({
             'value': curPass,
             'placeholder': _('optional')
         });
+        var dnsInput = E('input', {
+            'class': 'cbi-input-text',
+            'type': 'text',
+            'value': curDns,
+            'placeholder': '127.0.0.1:53'
+        });
 
         section.appendChild(E('table', {'class': 'table'}, [
             E('tr', {}, [
@@ -100,6 +107,19 @@ return baseclass.extend({
             _('Empty "Username" = no-auth SOCKS5 (RFC 1929 method 0x00).'),
             E('br'),
             _('Saving restarts dial-up to regenerate srv.yaml.')
+        ]));
+
+        section.appendChild(E('h3', {'style': 'margin-top:18px;'}, [_('Server Egress DNS')]));
+        section.appendChild(E('table', {'class': 'table'}, [
+            E('tr', {}, [
+                E('td', {'width': '30%'}, [_('Egress DNS')]),
+                E('td', {}, [dnsInput])
+            ])
+        ]));
+        section.appendChild(E('p', {'class': 'cbi-section-descr'}, [
+            '\u23f0 ' + _('Resolver the server uses for its own DNS queries.'),
+            E('br'),
+            _('Default 127.0.0.1:53 routes through the local podkop/sing-box resolver.')
         ]));
 
         var testResult = E('p', {'style': 'margin:8px 0; font-weight:600; min-height:1.2em;'});
@@ -152,7 +172,8 @@ return baseclass.extend({
                         SOCKS_PROXY_ADDR: addr,
                         SOCKS_PROXY_PORT: port,
                         SOCKS_PROXY_USER: user,
-                        SOCKS_PROXY_PASS: pass
+                        SOCKS_PROXY_PASS: pass,
+                        NET_DNS: dnsInput.value.trim()
                     }, true).then(function () {
                         ui.addNotification(null, E('p', {}, [_('SOCKS5 egress saved and dial-up restarted.')]), 'info');
                     }).catch(function (err) {

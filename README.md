@@ -212,6 +212,7 @@ sing-box работает как постоянный сервис с outbound-�
 | `SOCKS_PROXY_PORT` | | Upstream SOCKS5 порт (только сервер) |
 | `SOCKS_PROXY_USER` | | Upstream SOCKS5 логин |
 | `SOCKS_PROXY_PASS` | | Upstream SOCKS5 пароль |
+| `NET_DNS` | `127.0.0.1:53` | Выходной DNS сервера (только сервер); `127.0.0.1:53` — через локальный podkop/sing-box |
 | `OLCRTC_EXE` | `/etc/olcrtc-linux-arm64` | Путь до бинарника olcrtc |
 | `DATA_DIR` | `data` | Рабочая директория |
 | `LAST_PROVIDER_FILE` | `last_provider.json` | Файл сохранения провайдера |

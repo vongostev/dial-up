@@ -1,4 +1,5 @@
 /*
+[2026-07-31] :: 🚀 :: loop() now passes cfg.NetDNS into RenderParams for configurable server egress DNS
 [2026-07-13] :: 🛡️ :: Replaced errors.AsType with standard errors.As (pre-1.21 two-arg form); replaced 3x time.After with time.NewTimer+Stop for timer leak protection (LoopWait, Backoff, waitCmd stream wait)
 [2026-07-12] :: 🚀 :: Added TunnelRTTMs *int field to Status; snapshot() populates it from netCache.get() when hasRTT is true
 [2026-07-12] :: 🚀 :: Added manualDirect flag: SetRoute toggles it; loop promote is gated by !c.manualDirect; snapshot exposes it in Status.ManualDirect; crash/guardian demotes never touch the flag
@@ -406,6 +407,7 @@ func (c *Controller) loop(ctx context.Context) {
 						SocksProxyPort: c.cfg.SocksProxyPort,
 						SocksProxyUser: c.cfg.SocksProxyUser,
 						SocksProxyPass: c.cfg.SocksProxyPass,
+						NetDNS:         c.cfg.NetDNS,
 					})
 					configFile := "cnc.yaml"
 					if !c.cfg.IsClient {

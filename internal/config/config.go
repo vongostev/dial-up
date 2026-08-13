@@ -1,4 +1,5 @@
 /*
+[2026-07-31] :: 🚀 :: Added NetDNS (env NET_DNS, default 127.0.0.1:53) for configurable server egress DNS
 [2026-07-10] :: 🚀 :: Added SocksProxyAddr/Port/User/Pass env fields (server-only SOCKS5 egress) + ErrInvalidSocksPort validation
 [2026-07-09] :: 🚀 :: Added StatusPort (env STATUS_PORT, default 9091) for the local status HTTP endpoint
 [2026-07-02] :: 🚀 :: Initial config package
@@ -36,6 +37,7 @@ type Config struct {
 	SocksProxyPort   string `env:"SOCKS_PROXY_PORT"    envDefault:""`
 	SocksProxyUser   string `env:"SOCKS_PROXY_USER"    envDefault:""`
 	SocksProxyPass   string `env:"SOCKS_PROXY_PASS"    envDefault:""`
+	NetDNS           string `env:"NET_DNS"             envDefault:"127.0.0.1:53"`
 }
 
 // Load parses environment variables into a Config struct.

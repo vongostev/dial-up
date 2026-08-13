@@ -1,4 +1,5 @@
 /*
+[2026-07-31] :: 🚀 :: Added NetDNS to RenderParams + $net_dns substitution (configurable server egress DNS)
 [2026-07-10] :: 🚀 :: Added RenderParams + buildSocksProxyBlock for server-mode SOCKS5 egress; rewritten RenderConfig(RenderParams)
 [2026-07-02] :: 🚀 :: Initial render package
 */
@@ -17,6 +18,10 @@ var cncTemplate string
 //go:embed templates/srv.yaml
 var srvTemplate string
 
+// defaultNetDNS is used when RenderParams.NetDNS is empty, so the server
+// config always carries a valid resolver (defaults to the local sing-box DNS).
+const defaultNetDNS = "127.0.0.1:53"
+
 // RenderParams holds all inputs needed to render an olcrtc YAML config.
 type RenderParams struct {
 	IsClient       bool
@@ -27,6 +32,7 @@ type RenderParams struct {
 	SocksProxyPort string
 	SocksProxyUser string
 	SocksProxyPass string
+	NetDNS         string
 }
 
 // RenderConfig renders the olcrtc YAML config by substituting template variables.
@@ -35,10 +41,15 @@ func RenderConfig(p RenderParams) string {
 	if p.IsClient {
 		tpl = cncTemplate
 	}
+	dns := p.NetDNS
+	if dns == "" {
+		dns = defaultNetDNS
+	}
 	r := strings.NewReplacer(
 		"$provider", p.Provider,
 		"$room_id", p.RoomID,
 		"$olcrtc_key", p.OlcrtcKey,
+		"$net_dns", dns,
 		"$socks_proxy\n", buildSocksProxyBlock(p),
 	)
 	return r.Replace(tpl)

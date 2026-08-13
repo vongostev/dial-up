@@ -39,7 +39,7 @@ crypto:
   key: "cafebabe9876543210"
 net:
   transport: vp8channel
-  dns: "9.9.9.9:53"
+  dns: "127.0.0.1:53"
 data: data
 debug: false
 liveness:
@@ -149,9 +149,29 @@ func TestRenderServerNoSocks(t *testing.T) {
 		t.Errorf("placeholder must be fully removed:\n%s", got)
 	}
 	// No blank line where the placeholder was: dns line directly followed by data line.
-	if !strings.Contains(got, `  dns: "9.9.9.9:53"
+	if !strings.Contains(got, `  dns: "127.0.0.1:53"
 data: data`) {
 		t.Errorf("expected dns line directly followed by data line (no blank line):\n%s", got)
+	}
+}
+
+// TestRenderServerCustomDns asserts the server egress DNS is taken from NetDNS.
+func TestRenderServerCustomDns(t *testing.T) {
+	got := controller.RenderConfig(controller.RenderParams{
+		IsClient:  false,
+		Provider:  provider.ProviderTelemost,
+		RoomID:    "room-42",
+		OlcrtcKey: "cafebabe9876543210",
+		NetDNS:    "1.1.1.1:53",
+	})
+	if !strings.Contains(got, `  dns: "1.1.1.1:53"`) {
+		t.Errorf("expected custom dns 1.1.1.1:53 in:\n%s", got)
+	}
+	if strings.Contains(got, "127.0.0.1:53") {
+		t.Errorf("default dns must not appear when NetDNS is set:\n%s", got)
+	}
+	if strings.Contains(got, "$") {
+		t.Errorf("Render left unsubstituted $ in:\n%s", got)
 	}
 }
 
