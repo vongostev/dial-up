@@ -480,13 +480,13 @@ get_singbox() {
     fi
     # <|B:ClashFallback
 
-    # Read config
-    config="null"
-    if [ -f "/etc/sing-box/config.json" ]; then
-        config=$(cat "/etc/sing-box/config.json" 2>/dev/null | head -c 4096 || echo "null")
-    fi
-
-    printf '{"alive":%s,"route":"%s","config":%s}\n' "$alive" "$route" "$config"
+    # The sing-box config was previously embedded raw here, truncated to
+    # 4096 bytes with head -c. For configs larger than the cap (e.g. the 7 KB
+    # server config) that cut mid-JSON, so rpcd rejected the whole response
+    # ("Invalid argument") and every view mounting the statusbar — including
+    # the Clients count card — silently failed to render. No LuCI view reads
+    # the config, so return a compact, always-valid object instead.
+    printf '{"alive":%s,"route":"%s"}\n' "$alive" "$route"
 }
 
 # ── set_route ────────────────────────────────────────────────
