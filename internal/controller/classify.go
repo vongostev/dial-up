@@ -1,4 +1,5 @@
 /*
+[2026-08-17] :: 🐛 :: ClassDefinitive no longer drives immediate last_provider.json removal — waitCmd now treats it like a transient (backoff + maxFailures cascade) so a single 403/forbidden-class crash doesn't wipe a just-set provider; the classification is retained for logging/telemetry only
 [2026-07-07] :: 🛡️ :: Narrowed definitive tokens to anchored phrases ("status 403", "auth failed") to avoid false-positive removal on benign lines (e.g. "port 4030", "authority")
 [2026-07-07] :: 🚀 :: Initial classifier: definitive (403/forbidden/auth/room/provider-kind) vs transient (default) — drives immediate last_provider.json removal on definitive tunnel rejection
 */

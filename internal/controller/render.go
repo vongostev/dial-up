@@ -1,4 +1,6 @@
 /*
+[2026-08-24] :: 🛡️ :: Liveness: timeout 5s/7s -> 45s and failures 3 -> 4 in both templates — vp8channel's control plane legitimately goes silent 25-30s under load (KCP batching + SFU publisher renegotiation, olcrtc issue #95 / commit 384268b), so the tight timeouts caused false-positive 'reason=liveness' session kills ~1.5 min after connect
+[2026-08-24] :: 🐛 :: Drop `data: data` from both templates: olcrtc >= 46b82c6 hard-fails when a configured data dir lacks names/surnames dictionaries (dial-up never ships them), while an empty `data:` uses the embedded dictionaries — the old olcrtc required `data:` but silently fell back to embedded when files were missing
 [2026-07-31] :: 🚀 :: Added NetDNS to RenderParams + $net_dns substitution (configurable server egress DNS)
 [2026-07-10] :: 🚀 :: Added RenderParams + buildSocksProxyBlock for server-mode SOCKS5 egress; rewritten RenderConfig(RenderParams)
 [2026-07-02] :: 🚀 :: Initial render package

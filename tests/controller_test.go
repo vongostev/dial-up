@@ -1,4 +1,6 @@
 /*
+[2026-08-24] :: 🚀 :: Added TestControllerTracksPeersCount + TestControllerResetsPeersOnProcessStart for the new Status.Peers counter parsed from olcrtc output
+[2026-08-17] :: 🐛 :: Definitive crash no longer removes file/clears provider on 1st crash (backoff+maxFailures now apply); renamed test to TestControllerKeepsProviderOnDefinitiveCrash
 [2026-07-12] :: 🚀 :: Added TestSetRouteManualOverrideFlag: SetRoute("direct") sets ManualDirect, SetRoute("proxy") clears it
 [2026-07-08] :: 🔌 :: Updated fakeSingBox to satisfy new singbox.Controller interface (added Status() method)
 [2026-07-07] :: 🚀 :: Added classified-removal integration tests: definitive crash removes file on 1st crash; transient crash keeps file + bumps crashFailures; env start-fault keeps file + leaves crashFailures at 0; ClearProvider removes file
@@ -341,6 +343,59 @@ func writeFakeOlcrtc(t *testing.T, dir, body string) string {
 	return script
 }
 
+// TestControllerTracksPeersCount verifies the peers counter is parsed from olcrtc output.
+func TestControllerTracksPeersCount(t *testing.T) {
+	dir := chdirTemp(t)
+	script := writeFakeOlcrtc(t, dir, "echo 'Current peers count: 3, Devices: [dev-a, dev-b, dev-c]' >&2\nsleep 60\n")
+
+	l := logger.New(true)
+	cfg := &config.Config{IsClient: false, SleepOnError: 1, OlcrtcExe: script, LastProviderFile: "last_provider.json"}
+	ctrl := controller.New(cfg, l, &fakeSingBox{})
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	ctrl.Start(ctx)
+	ctrl.SetProvider(&provider.Provider{Kind: "wbstream", RoomID: "room-1"}, true)
+
+	// Poll until the peer-count line has been consumed and parsed.
+	deadline := time.Now().Add(10 * time.Second)
+	for time.Now().Before(deadline) {
+		if ctrl.Status().Peers == 3 {
+			break
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+	if got := ctrl.Status().Peers; got != 3 {
+		t.Fatalf("expected peers parsed as 3, got: %d", got)
+	}
+}
+
+// TestControllerResetsPeersOnProcessStart verifies peers resets to 0 on a new process start.
+func TestControllerResetsPeersOnProcessStart(t *testing.T) {
+	dir := chdirTemp(t)
+	script := writeFakeOlcrtc(t, dir, "sleep 60\n")
+
+	l := logger.New(true)
+	cfg := &config.Config{IsClient: false, SleepOnError: 1, OlcrtcExe: script, LastProviderFile: "last_provider.json"}
+	ctrl := controller.New(cfg, l, &fakeSingBox{})
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	ctrl.Start(ctx)
+	ctrl.SetProvider(&provider.Provider{Kind: "wbstream", RoomID: "room-1"}, true)
+
+	deadline := time.Now().Add(10 * time.Second)
+	for time.Now().Before(deadline) {
+		if ctrl.Status().TunnelAlive {
+			break
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+	if got := ctrl.Status().Peers; got != 0 {
+		t.Fatalf("expected peers reset to 0 on fresh process, got: %d", got)
+	}
+}
+
 // chdirTemp chdirs to a fresh temp dir for the test and restores cwd on cleanup.
 func chdirTemp(t *testing.T) string {
 	t.Helper()
@@ -353,7 +408,7 @@ func chdirTemp(t *testing.T) string {
 	return dir
 }
 
-func TestControllerRemovesProviderOnDefinitiveCrash(t *testing.T) {
+func TestControllerKeepsProviderOnDefinitiveCrash(t *testing.T) {
 	dir := chdirTemp(t)
 	script := writeFakeOlcrtc(t, dir, "echo 'carrier auth failed: status 403 guests cannot create rooms' >&2\nexit 1\n")
 
@@ -361,7 +416,6 @@ func TestControllerRemovesProviderOnDefinitiveCrash(t *testing.T) {
 	cfg := &config.Config{IsClient: true, SleepOnError: 1, OlcrtcExe: script, LastProviderFile: "last_provider.json"}
 	ctrl := controller.New(cfg, l, &fakeSingBox{})
 
-	// Pre-create the persisted file so "removed" is a meaningful observation.
 	controller.SaveLastProvider("last_provider.json", provider.Provider{Kind: "wbstream", RoomID: "room-1"}, l)
 
 	ctx, cancel := context.WithCancel(context.Background())
@@ -369,25 +423,25 @@ func TestControllerRemovesProviderOnDefinitiveCrash(t *testing.T) {
 	ctrl.Start(ctx)
 	ctrl.SetProvider(&provider.Provider{Kind: "wbstream", RoomID: "room-1"}, true)
 
-	// Poll until the definitive path removes the persisted file (RemoveLastProvider runs after the
-	// lock is released, so observing the file's absence is race-free and confirms full processing).
+	// Poll until the definitive crash has been processed and counted (backoff path, no removal).
 	deadline := time.Now().Add(10 * time.Second)
-	var removed bool
+	var s controller.Status
 	for time.Now().Before(deadline) {
-		if _, err := os.Stat("last_provider.json"); os.IsNotExist(err) {
-			removed = true
+		s = ctrl.Status()
+		if s.LastExitCode != nil && s.CrashFailures > 0 {
 			break
 		}
 		time.Sleep(50 * time.Millisecond)
 	}
 
-	if !removed {
-		t.Fatalf("expected last_provider.json removed after definitive crash")
+	if _, err := os.Stat("last_provider.json"); os.IsNotExist(err) {
+		t.Fatalf("expected last_provider.json to be retained after a single definitive crash")
 	}
-
-	s := ctrl.Status()
-	if s.Provider != nil {
-		t.Fatalf("expected provider cleared after definitive crash, got: %+v", s.Provider)
+	if s.Provider == nil {
+		t.Fatalf("expected provider retained after a single definitive crash")
+	}
+	if s.CrashFailures < 1 {
+		t.Errorf("expected crashFailures incremented after definitive crash, got: %d", s.CrashFailures)
 	}
 	if !strings.Contains(s.LastError, "guests cannot create rooms") {
 		t.Errorf("expected LastError to embed captured line, got: %q", s.LastError)

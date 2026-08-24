@@ -9,9 +9,8 @@ net:
   transport: vp8channel
   dns: "$net_dns"
 $socks_proxy
-data: data
 debug: false
 liveness:
   interval: 10s
-  timeout: 5s
-  failures: 3
+  timeout: 45s
+  failures: 4

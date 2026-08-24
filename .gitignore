@@ -3,6 +3,7 @@
 .idea
 bin/*.tgz
 data/
+.dsh/
 # cnc.yaml
 # srv.yaml
 last_provider.json

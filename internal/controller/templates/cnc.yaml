@@ -11,9 +11,8 @@ net:
 socks:
   host: "127.0.0.1"
   port: 1080
-data: data
 debug: false
 liveness:
   interval: 10s
-  timeout: 7s
-  failures: 3
+  timeout: 45s
+  failures: 4

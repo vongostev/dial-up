@@ -31,6 +31,18 @@ function describe(status, singbox, env) {
 	var botType = botOk ? 'ok' : 'bad';
 	var botText = botOk ? _('Online') : _('Offline');
 
+	// Clients (server only): peer count parsed by the Go bot from olcrtc's
+	// "Current peers count: N" lines. Absent/unknown on the client router.
+	var clients;
+	if (!isClient) {
+		var pc = status.peers;
+		if (typeof pc === 'number' || (pc != null && pc !== '')) {
+			clients = { text: '' + pc, type: pc > 0 ? 'ok' : 'neutral' };
+		} else {
+			clients = { text: '—', type: 'neutral' };
+		}
+	}
+
 	// Tunnel State — client uses RTT as authoritative; server uses process running
 	var tunnelType, tunnelText;
 
@@ -89,6 +101,7 @@ function describe(status, singbox, env) {
 	return {
 		bot: { text: botText, type: botType },
 		tunnel: { text: tunnelText, type: tunnelType },
+		clients: clients,
 		route: { text: routeText, type: routeType, icon: routeIcon, label: isClient ? _('LAN Route') : _('Egress') }
 	};
 }
@@ -109,14 +122,19 @@ function renderStatusStrip(status, singbox, env) {
 		]);
 	}
 
+	var cards = [
+		makeCard('\ud83e\udd16', _('Bot'), s.bot),
+		makeCard('\ud83d\ude87', _('Tunnel'), s.tunnel)
+	];
+	if (s.clients) {
+		cards.push(makeCard('\ud83d\udc65', _('Clients'), s.clients));
+	}
+	cards.push(makeCard(s.route.icon, s.route.label, s.route));
+
 	return E('div', {
 		'class': 'olcrtc-status-panel',
 		'style': 'display: flex; flex-wrap: wrap; gap: 16px; margin-bottom: 24px;'
-	}, [
-		makeCard('\ud83e\udd16', _('Bot'), s.bot),
-		makeCard('\ud83d\ude87', _('Tunnel'), s.tunnel),
-		makeCard(s.route.icon, s.route.label, s.route)
-	]);
+	}, cards);
 }
 
 return baseclass.extend({

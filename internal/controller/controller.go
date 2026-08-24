@@ -1,4 +1,6 @@
 /*
+[2026-08-24] :: 🚀 :: Status.Peers: parse olcrtc's "Current peers count: N" lines in streamSubprocess (regexp) into a mutex-guarded counter, reset to 0 on every new process start, exposed as peers in the /status JSON — lets the LuCI server panel show how many clients are connected
+[2026-08-17] :: 🐛 :: Definitive-rejection no longer wipes provider + last_provider.json on a single crash: it now increments failures/crashFailures so backoff + maxFailures cascade apply, keeping a just-set provider alive across a one-off 403/auth glitch (previously LUCI "Connect / Update" started the tunnel, it crashed once, and the settings were deleted and never rewritten)
 [2026-07-31] :: 🚀 :: loop() now passes cfg.NetDNS into RenderParams for configurable server egress DNS
 [2026-07-13] :: 🛡️ :: Replaced errors.AsType with standard errors.As (pre-1.21 two-arg form); replaced 3x time.After with time.NewTimer+Stop for timer leak protection (LoopWait, Backoff, waitCmd stream wait)
 [2026-07-12] :: 🚀 :: Added TunnelRTTMs *int field to Status; snapshot() populates it from netCache.get() when hasRTT is true
@@ -28,6 +30,8 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"regexp"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -40,6 +44,13 @@ import (
 	"dial-up/internal/provider"
 	"dial-up/internal/singbox"
 )
+
+// peersCountRe matches the olcrtc server's peer-count log line
+// ("Current peers count: N, Devices: [...]"), emitted on every peer
+// connect/disconnect and at server startup.
+//
+//nolint:gochecknoglobals // immutable package-level regexp
+var peersCountRe = regexp.MustCompile(`Current peers count: (\d+)`)
 
 const maxFailures = 5
 
@@ -60,6 +71,7 @@ type Status struct {
 	VkAlive        bool               `json:"vk_alive"`
 	ManualDirect   bool               `json:"manual_direct"`
 	TunnelRTTMs    *int               `json:"tunnel_rtt_ms"`
+	Peers          int                `json:"peers"`
 }
 
 // Controller manages the olcrtc subprocess lifecycle in a single goroutine loop.
@@ -83,6 +95,7 @@ type Controller struct {
 	lastExitCode  *int
 	lastError     string
 	lastOutput    string
+	peers         int
 	streamWg      *sync.WaitGroup
 	vkAlive       atomic.Bool
 
@@ -287,6 +300,7 @@ func (c *Controller) snapshot() Status {
 		CrashFailures:  c.crashFailures,
 		VkAlive:        c.vkAlive.Load(),
 		ManualDirect:   c.manualDirect,
+		Peers:          c.peers,
 	}
 	if c.provider != nil {
 		s.Provider = new(*c.provider)
@@ -421,6 +435,9 @@ func (c *Controller) loop(ctx context.Context) {
 						c.mu.Unlock()
 						return
 					}
+					// A fresh olcrtc process starts with zero peers; its first
+					// "Current peers count" line (or the absence of one) re-establishes it.
+					c.peers = 0
 					cmd := exec.Command(c.cfg.OlcrtcExe, configFile)
 					// surface in logs and /s instead of being discarded. os.Pipe gives the child a real fd.
 					pr, pw, err := os.Pipe()
@@ -558,7 +575,6 @@ func (c *Controller) waitCmd(cmd *exec.Cmd) {
 		}
 	}
 
-	removeFile := false
 	c.mu.Lock()
 	if c.cmd == cmd {
 		c.cmd = nil
@@ -583,27 +599,30 @@ func (c *Controller) waitCmd(cmd *exec.Cmd) {
 			}
 
 			class := ClassifyOutput(msg)
+			// A single "definitive" crash previously wiped the provider AND
+			// last_provider.json immediately. That caused the reported bug: filling in a Provider
+			// URL started the tunnel, it crashed once with a 403/forbidden-class line, and the
+			// settings were deleted and never rewritten. Now a definitive rejection is treated like
+			// any other crash — it increments failures/crashFailures so the exponential backoff and
+			// the maxFailures safety net apply, and the provider+persistence survive unless the
+			// subprocess keeps crashing (>maxFailures). The classification is retained for logging.
 			if class == ClassDefinitive {
-				// Definitive tunnel rejection — provider data is permanently unusable. Drop it now
-				// instead of running the ~23 min maxFailures cascade against a guaranteed-to-fail upstream.
-				c.provider = nil
-				c.failures = 0
-				c.crashFailures = 0
-				c.lastError = fmt.Sprintf("⛔ Провайдер отклонён тоннелем (%s), сохранение удалено", msg)
-				removeFile = true
-				cl.Error("controller", "Definitive provider rejection, removing persistence", logger.Block("ExitEval"), logger.Status("FAIL"), logger.Importance(9), logger.Any("exit_code", code), logger.String("captured", msg), logger.String("class", "definitive"))
+				c.failures++
+				c.crashFailures++
+				c.lastError = fmt.Sprintf("⛔ Провайдер отклонён тоннелем (%s)", msg)
+				cl.Error("controller", "Definitive provider rejection, backing off (retained)", logger.Block("ExitEval"), logger.Status("FAIL"), logger.Importance(8), logger.Any("exit_code", code), logger.Int("failures", c.failures), logger.Int("crashFailures", c.crashFailures), logger.String("captured", msg), logger.String("class", "definitive"))
 			} else {
 				// Transient failure — retry with backoff; count toward the maxFailures safety net.
 				c.failures++
 				c.crashFailures++
 				c.lastError = msg
 				cl.Warn("controller", "Subprocess crashed", logger.Block("ExitEval"), logger.Status("FAIL"), logger.Importance(8), logger.Any("exit_code", code), logger.Int("failures", c.failures), logger.Int("crashFailures", c.crashFailures), logger.String("captured", msg), logger.String("class", "transient"))
+			}
 
-				// Best-effort demote to direct route so LAN keeps internet access when olcrtc is down.
-				if c.cfg.IsClient {
-					if err := c.singbox.SetRoute(singbox.ModeDirect); err != nil {
-						cl.Warn("controller", "Failed to set direct route after crash", logger.Block("ExitEval"), logger.Status("FAIL"), logger.Importance(6), logger.Error(err))
-					}
+			// Best-effort demote to direct route so LAN keeps internet access when olcrtc is down.
+			if c.cfg.IsClient {
+				if err := c.singbox.SetRoute(singbox.ModeDirect); err != nil {
+					cl.Warn("controller", "Failed to set direct route after crash", logger.Block("ExitEval"), logger.Status("FAIL"), logger.Importance(6), logger.Error(err))
 				}
 			}
 		} else {
@@ -611,10 +630,6 @@ func (c *Controller) waitCmd(cmd *exec.Cmd) {
 		}
 	}
 	c.mu.Unlock()
-
-	if removeFile {
-		RemoveLastProvider(c.cfg.LastProviderFile, c.l)
-	}
 
 	select {
 	case c.sig <- struct{}{}:
@@ -639,6 +654,11 @@ func (c *Controller) streamSubprocess(pr *os.File, wg *sync.WaitGroup) {
 		cl.Info("controller", "olcRTC: "+line, logger.Block("Subprocess"), logger.Status("OK"), logger.Importance(4), logger.String("line", line))
 		c.mu.Lock()
 		c.lastOutput = line
+		if m := peersCountRe.FindStringSubmatch(line); m != nil {
+			if n, err := strconv.Atoi(m[1]); err == nil {
+				c.peers = n
+			}
+		}
 		c.mu.Unlock()
 	}
 	if err := scanner.Err(); err != nil {

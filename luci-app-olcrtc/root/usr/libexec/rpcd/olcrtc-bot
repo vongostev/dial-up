@@ -8,16 +8,28 @@ set -e
 ENV_FILE="/etc/dial-up.env"
 LAST_PROVIDER_FILE="/last_provider.json"
 
-# Parse LAST_PROVIDER_FILE path from env if present
+# Parse LAST_PROVIDER_FILE path from env if present.
+# |:BUG_FIX: Previously a relative LAST_PROVIDER_FILE was resolved against root ("/$_lpf"),
+# but the Go bot chdir()'s into DATA_DIR and resolves a relative LAST_PROVIDER_FILE relative
+# to that dir — so LUCI persisted to /last_provider.json while the bot read/wrote
+# DATA_DIR/last_provider.json (two different files). Now the same resolution as Go applies:
+# DATA_DIR (procd CWD = "/") is joined first, then the (possibly relative) provider file.
 if [ -f "$ENV_FILE" ]; then
+    _dd=$(grep '^DATA_DIR=' "$ENV_FILE" | head -1 | cut -d= -f2-)
+    [ -z "$_dd" ] && _dd="data"   # matches Go config.go DATA_DIR default
     _lpf=$(grep '^LAST_PROVIDER_FILE=' "$ENV_FILE" | head -1 | cut -d= -f2-)
-    if [ -n "$_lpf" ]; then
-        # Relative path — resolve against root (CWD where init.d runs)
-        case "$_lpf" in
-            /*) LAST_PROVIDER_FILE="$_lpf" ;;
-            *)  LAST_PROVIDER_FILE="/$_lpf" ;;
-        esac
-    fi
+    [ -z "$_lpf" ] && _lpf="last_provider.json"   # matches Go config.go default
+    case "$_lpf" in
+        /*) LAST_PROVIDER_FILE="$_lpf" ;;
+        *)
+            # Relative provider file — resolve against DATA_DIR exactly like the Go binary
+            # (which chdir's into DATA_DIR; procd launches it with CWD="/").
+            case "$_dd" in
+                /*) LAST_PROVIDER_FILE="$_dd/$_lpf" ;;
+                *)  LAST_PROVIDER_FILE="/$_dd/$_lpf" ;;
+            esac
+            ;;
+    esac
 fi
 
 # Local Go status endpoint port (loopback). 9091 by default; 9090 is the
@@ -63,7 +75,7 @@ _get_env_value() {
 list() {
     cat <<'JSONLIST'
 {
-"get_status":{"running":{"type":"boolean"},"is_client":{"type":"boolean"},"vk_alive":{"type":"boolean"},"provider":{"type":"array"},"transport":{"type":"string"},"uptime_seconds":{"type":"int64"},"last_started":{"type":"string"},"last_stopped":{"type":"string"},"last_error":{"type":"string"},"last_exit_code":{"type":"int64"},"failures":{"type":"int64"},"crash_failures":{"type":"int64"},"dns_ping":{"type":"string"}},
+"get_status":{"running":{"type":"boolean"},"is_client":{"type":"boolean"},"vk_alive":{"type":"boolean"},"provider":{"type":"array"},"transport":{"type":"string"},"uptime_seconds":{"type":"int64"},"last_started":{"type":"string"},"last_stopped":{"type":"string"},"last_error":{"type":"string"},"last_exit_code":{"type":"int64"},"failures":{"type":"int64"},"crash_failures":{"type":"int64"},"dns_ping":{"type":"string"},"peers":{"type":"int64"}},
 "get_env":{},
 "set_env":{"env":{"type":"object"},"restart":{"type":"boolean"}},
 "service_action":{"action":{"type":"string"}},
@@ -119,7 +131,7 @@ call() {
 #    "last_started":"YYYY-MM-DD HH:MM:SS","last_stopped":"...",
 #    "last_error":"<str>","last_exit_code":<int|null>,
 #    "failures":<int>,"crash_failures":<int>,"dns_ping":"<str>",
-#    "tunnel_rtt_ms":<int|null>}
+#    "tunnel_rtt_ms":<int|null>,"peers":<int>}
 get_status() {
     if command -v jsonfilter >/dev/null 2>&1; then
         _resp=""
@@ -201,10 +213,15 @@ get_status_from_go() {
         tunnel_rtt_ms="null"
     fi
 
+    # Connected clients on the server: parsed by the Go bot from olcrtc's
+    # "Current peers count: N" lines. Only meaningful in server mode.
+    peers=$(jsonfilter -s "$_resp" -e '@.peers' 2>/dev/null || echo "0")
+    [ -z "$peers" ] && peers=0
+
     printf '{"running":%s,"is_client":%s,"vk_alive":%s,"provider":%s,"transport":"%s","uptime_seconds":%d,' "$running" "$is_client" "$vk_alive" "$provider" "$transport" "$uptime_seconds"
     printf '"last_started":"%s","last_stopped":"%s",' "$(printf '%s' "$last_started" | sed 's/"/\\"/g')" "$(printf '%s' "$last_stopped" | sed 's/"/\\"/g')"
     printf '"last_error":"%s","last_exit_code":%s,' "$(printf '%s' "$last_error" | sed 's/"/\\"/g')" "$last_exit_code"
-    printf '"failures":%d,"crash_failures":%d,"dns_ping":"%s","tunnel_rtt_ms":%s}\n' "$failures" "$crash_failures" "$dns_ping" "$tunnel_rtt_ms"
+    printf '"failures":%d,"crash_failures":%d,"dns_ping":"%s","tunnel_rtt_ms":%s,"peers":%s}\n' "$failures" "$crash_failures" "$dns_ping" "$tunnel_rtt_ms" "$peers"
 }
 
 # Format an RFC3339 (or null/empty) timestamp as "YYYY-MM-DD HH:MM:SS".
@@ -331,10 +348,18 @@ get_status_syslog() {
         [ "$_elapsed" -gt 0 ] 2>/dev/null && dns_ping="${_elapsed}ms" || dns_ping="<1ms"
     fi
 
+    # Connected clients (server): last "Current peers count: N" from the olcRTC log lines.
+    peers=0
+    _peers_line=$(echo "$_log" | grep -o 'Current peers count: [0-9]*' | tail -1)
+    if [ -n "$_peers_line" ]; then
+        _peers_num=$(echo "$_peers_line" | awk '{print $NF}')
+        [ -n "$_peers_num" ] && [ "$_peers_num" -ge 0 ] 2>/dev/null && peers=$_peers_num
+    fi
+
     printf '{"running":%s,"is_client":%s,"vk_alive":%s,"provider":%s,"transport":"%s","uptime_seconds":%d,' "$running" "$is_client" "$vk_alive" "$provider" "$transport" "$uptime_seconds"
     printf '"last_started":"%s","last_stopped":"%s",' "$last_started" "$last_stopped"
     printf '"last_error":"%s","last_exit_code":%s,' "$(printf '%s' "$last_error" | sed 's/"/\\"/g')" "$last_exit_code"
-    printf '"failures":%d,"crash_failures":%d,"dns_ping":"%s","tunnel_rtt_ms":null}\n' "$failures" "$crash_failures" "$dns_ping"
+    printf '"failures":%d,"crash_failures":%d,"dns_ping":"%s","tunnel_rtt_ms":null,"peers":%s}\n' "$failures" "$crash_failures" "$dns_ping" "$peers"
 }
 
 # ── get_env ──────────────────────────────────────────────────

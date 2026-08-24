@@ -55,8 +55,7 @@
     "rules": [
       {
         "action": "sniff",
-        "timeout": "300ms",
-        "override_destination": true
+        "timeout": "300ms"
       },
       {
         "domain_suffix": ["local", ".lan", ".internal"],

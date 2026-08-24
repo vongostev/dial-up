@@ -22,12 +22,11 @@ net:
 socks:
   host: "127.0.0.1"
   port: 1080
-data: data
 debug: false
 liveness:
   interval: 10s
-  timeout: 7s
-  failures: 3
+  timeout: 45s
+  failures: 4
 `
 
 const canonicalServer = `mode: srv
@@ -40,12 +39,11 @@ crypto:
 net:
   transport: vp8channel
   dns: "127.0.0.1:53"
-data: data
 debug: false
 liveness:
   interval: 10s
-  timeout: 5s
-  failures: 3
+  timeout: 45s
+  failures: 4
 `
 
 func TestRenderClient(t *testing.T) {
@@ -102,7 +100,7 @@ func TestRenderServerWithSocks(t *testing.T) {
   proxy_port: 1080
   proxy_user: "myuser"
   proxy_pass: "secretpass"
-data: data`
+debug: false`
 	if !strings.Contains(got, wantBlock) {
 		t.Errorf("expected socks block not found in:\n%s", got)
 	}
@@ -125,7 +123,7 @@ func TestRenderServerSocksNoAuth(t *testing.T) {
 	wantBlock := `socks:
   proxy_addr: "203.0.113.10"
   proxy_port: 1080
-data: data`
+debug: false`
 	if !strings.Contains(got, wantBlock) {
 		t.Errorf("expected no-auth socks block not found in:\n%s", got)
 	}
@@ -148,10 +146,10 @@ func TestRenderServerNoSocks(t *testing.T) {
 	if strings.Contains(got, "$socks_proxy") {
 		t.Errorf("placeholder must be fully removed:\n%s", got)
 	}
-	// No blank line where the placeholder was: dns line directly followed by data line.
+	// No blank line where the placeholder was: dns line directly followed by debug line.
 	if !strings.Contains(got, `  dns: "127.0.0.1:53"
-data: data`) {
-		t.Errorf("expected dns line directly followed by data line (no blank line):\n%s", got)
+debug: false`) {
+		t.Errorf("expected dns line directly followed by debug line (no blank line):\n%s", got)
 	}
 }
 

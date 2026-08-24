@@ -1,0 +1,136 @@
+# Build and commit the OpenWrt (linux/arm64) binaries.
+#
+# Only the public branch is pushed to GitHub: develop stays local because it
+# carries closed semantic markup (|>MANIFEST / |>CHANGELOG). Getting code from
+# develop into the public branch is done locally with the
+#   merge - reset HEAD~1 - commit
+# pipeline (local hooks strip the markup). This workflow NEVER merges develop
+# into main: it only rebuilds bin/*-linux-arm64 from whatever source is already
+# on the public branch and commits the fresh binaries back there. The binary
+# commit touches only bin/ files, so no markup can leak into the public branch.
+#
+# Install flow (install.sh / deploy.sh) downloads these binaries from
+#   raw.githubusercontent.com/vongostev/dial-up/main/bin/
+# so committing them here is what removes the manual "build: update binary"
+# step.
+#
+# Bumping olcrtc: change OLCRTC_REF below to a newer commit/tag, or run this
+# workflow manually (workflow_dispatch) and pass the desired ref.
+
+name: build binaries
+
+on:
+  push:
+    branches: [main, master]
+  workflow_dispatch:
+    inputs:
+      olcrtc-ref:
+        description: olcrtc commit/tag/branch to build
+        required: false
+        default: ""
+
+env:
+  GO_VERSION: "1.26.3" # toolchain the current binaries were built with
+  OLCRTC_REPO: openlibrecommunity/olcrtc
+  # olcrtc source pin; bump to get a newer olcrtc binary.
+  OLCRTC_REF: f616f57bb3a90740f1755922ffeaa7acc5cfe4ed
+
+concurrency:
+  group: build-binaries-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  # Tests gate the build: binaries are only committed when the source on the
+  # public branch passes the race-enabled suite (see tests/test_guide.md).
+  test:
+    name: Test (-race)
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Checkout dial-up
+        uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: ${{ env.GO_VERSION }}
+
+      - name: Run Go tests (-race)
+        run: go test -race -count=1 -timeout 15m ./...
+
+      - name: Run install.sh structural tests
+        run: |
+          if [ -f tests/install_script_test.sh ]; then
+            sh tests/install_script_test.sh
+          else
+            echo "::notice::tests/install_script_test.sh not present, skipping"
+          fi
+
+  build:
+    name: Build arm64 binaries
+    needs: test
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    permissions:
+      contents: write # needed to push the binary commit back
+    steps:
+      - name: Checkout dial-up
+        uses: actions/checkout@v4
+
+      - name: Checkout olcrtc
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ env.OLCRTC_REPO }}
+          ref: ${{ inputs.olcrtc-ref || env.OLCRTC_REF }}
+          path: olcrtc-src
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: ${{ env.GO_VERSION }}
+          cache-dependency-path: |
+            go.sum
+            olcrtc-src/go.sum
+
+      # Same flags as mage BuildArm64 (magefile.go):
+      #   GOOS=linux GOARCH=arm64 CGO_ENABLED=0 go build -trimpath
+      #   -gcflags=all=-l -ldflags=-s -w -o bin/dial-up-linux-arm64 .
+      - name: Build dial-up binary
+        run: |
+          export GOOS=linux GOARCH=arm64 CGO_ENABLED=0
+          go build -trimpath -gcflags=all=-l -ldflags="-s -w" -o bin/dial-up-linux-arm64 .
+
+      # Same as olcrtc magefile buildBinary (mage cross):
+      #   GOOS=linux GOARCH=arm64 CGO_ENABLED=0 go build -trimpath
+      #   -ldflags=-s -w -o build/olcrtc-linux-arm64 ./cmd/olcrtc
+      - name: Build olcrtc binary
+        run: |
+          cd olcrtc-src
+          export GOOS=linux GOARCH=arm64 CGO_ENABLED=0
+          go build -trimpath -ldflags="-s -w" -o ../bin/olcrtc-linux-arm64 ./cmd/olcrtc
+
+      - name: Upload binaries as artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: binaries-${{ github.ref_name }}
+          path: |
+            bin/dial-up-linux-arm64
+            bin/olcrtc-linux-arm64
+          if-no-files-found: error
+
+      - name: Commit and push binaries
+        run: |
+          if git diff --quiet HEAD -- bin/; then
+            echo "::notice::binaries unchanged, nothing to commit"
+            exit 0
+          fi
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add bin/dial-up-linux-arm64 bin/olcrtc-linux-arm64
+          git commit -m "build: update binaries"
+          # A push made with GITHUB_TOKEN does not re-trigger this workflow,
+          # so there is no loop.
+          git push origin "HEAD:${GITHUB_REF_NAME}" || {
+            git pull --rebase origin "${GITHUB_REF_NAME}"
+            git push origin "HEAD:${GITHUB_REF_NAME}"
+          }

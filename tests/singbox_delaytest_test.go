@@ -93,3 +93,5 @@ func TestDelayTestZero(t *testing.T) {
 		t.Fatal("expected error on zero delay")
 	}
 }
+
+// <|F:TestDelayTestZero
