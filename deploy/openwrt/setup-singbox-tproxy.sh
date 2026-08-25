@@ -56,15 +56,34 @@ info "UCI network committed (rule + local route in table ${TABLE})"
 # ---------------------------------------------------------------------------
 log "Writing nft snippet /etc/sing-box/tproxy.nft"
 mkdir -p /etc/sing-box
-cat > /etc/sing-box/tproxy.nft <<'EOF'
+
+# Bypass set: only subnets directly connected to this router (loopback + LAN/WAN)
+# skip the redirect — they are reachable without the tunnel. ALL other
+# destinations, including RFC1918 networks behind the home server (e.g.
+# private LAN and corporate networks), are redirected to sing-box and go through
+# the olcrtc tunnel when the route-select selector is "proxy". The previous
+# hardcoded { 10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16 } bypass made the
+# internal network unreachable for LAN clients.
+BYPASS="127.0.0.0/8"
+for _dev in $(ip -o link show 2>/dev/null | awk -F': ' '{print $2}'); do
+	for _a in $(ip -f inet -o addr show dev "$_dev" 2>/dev/null | awk '{print $4}'); do
+		case "$_a" in
+			127.*|169.254.*) continue ;;
+		esac
+		BYPASS="$BYPASS, $_a"
+	done
+done
+
+cat > /etc/sing-box/tproxy.nft <<EOF
 chain singbox_tproxy {
   type filter hook prerouting priority mangle; policy accept;
-  iifname "br-lan" ip daddr { 127.0.0.0/8, 10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16 } counter accept
+  iifname "br-lan" ip daddr { $BYPASS } counter accept
   iifname "br-lan" meta nfproto ipv4 udp dport { 53, 67, 68 } counter accept
+  iifname "br-lan" meta nfproto ipv4 tcp flags syn tcp option maxseg size set 1200 counter
   iifname "br-lan" meta nfproto ipv4 meta l4proto { tcp, udp } counter meta mark set 0x1 tproxy ip to 127.0.0.1:2080 accept
 }
 EOF
-info "nft snippet written"
+info "nft snippet written (bypass: ${BYPASS})"
 
 # ---------------------------------------------------------------------------
 # 3) Register as fw4 include so rules survive fw4 reload / reboot.

@@ -1,0 +1,35 @@
+{
+	"luci-app-dial-up": {
+		"description": "Grant access to dial-up-bot ubus methods",
+		"read": {
+			"ubus": {
+				"dial-up-bot": [
+					"get_status",
+					"get_env",
+					"get_singbox",
+					"get_firewall",
+					"get_logs",
+				"ping_dns",
+				"get_whitelist",
+				"generate_key",
+				"test_socks_proxy"
+				],
+				"uci": [
+					"firewall.singbox_tproxy.path"
+				]
+			}
+		},
+		"write": {
+			"ubus": {
+				"dial-up-bot": [
+					"set_env",
+					"service_action",
+					"set_route",
+					"set_whitelist",
+					"set_provider",
+					"clear_provider"
+				]
+			}
+		}
+	}
+}

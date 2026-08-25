@@ -22,6 +22,7 @@ import (
 )
 
 const ModeProxy = "proxy"
+const ModeAwg = "awg"
 const ModeDirect = "direct"
 
 const logCategory = "singbox"
@@ -29,7 +30,7 @@ const logCategory = "singbox"
 // defaultClashAddr is the default address of the sing-box Clash API external controller.
 const defaultClashAddr = "127.0.0.1:9090"
 
-var ErrInvalidRouteMode = errors.New("invalid route mode: must be 'proxy' or 'direct'")
+var ErrInvalidRouteMode = errors.New("invalid route mode: must be 'proxy', 'awg' or 'direct'")
 
 // Status is a snapshot of sing-box state: whether the Clash API is reachable and the active route.
 type Status struct {
@@ -66,11 +67,11 @@ func New(l logger.Logger) *ControllerImpl {
 	}
 }
 
-// SetRoute switches the route-select selector to the given mode.
+// SetRoute switches the route-select selector to the given mode ("proxy", "awg" or "direct").
 func (c *ControllerImpl) SetRoute(mode string) error {
 	cl := c.l.With(logger.Function("ControllerImpl.SetRoute"))
 
-	if mode != ModeProxy && mode != ModeDirect {
+	if mode != ModeProxy && mode != ModeAwg && mode != ModeDirect {
 		cl.Error(logCategory, "Invalid route mode", logger.Block("Validate"), logger.Status("FAIL"), logger.Importance(7), logger.String("mode", mode))
 		return fmt.Errorf("%w: %s", ErrInvalidRouteMode, mode)
 	}

@@ -1,0 +1,41 @@
+{
+  "admin/services/dial-up": {
+    "title": "dial-up!",
+    "order": 50,
+    "action": {
+      "type": "firstchild"
+    }
+  },
+  "admin/services/dial-up/network": {
+    "title": "Network",
+    "order": 30,
+    "action": {
+      "type": "view",
+      "path": "dial-up/network"
+    }
+  },
+  "admin/services/dial-up/tunnel": {
+    "title": "Tunnel",
+    "order": 20,
+    "action": {
+      "type": "view",
+      "path": "dial-up/tunnel"
+    }
+  },
+  "admin/services/dial-up/bot": {
+    "title": "Bot",
+    "order": 10,
+    "action": {
+      "type": "view",
+      "path": "dial-up/bot"
+    }
+  },
+  "admin/services/dial-up/logs": {
+    "title": "Logs",
+    "order": 40,
+    "action": {
+      "type": "view",
+      "path": "dial-up/logs"
+    }
+  }
+}

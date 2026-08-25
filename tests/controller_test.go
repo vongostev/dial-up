@@ -132,7 +132,6 @@ func TestRenderStatus(t *testing.T) {
 			name:   "empty status",
 			status: controller.Status{},
 			checks: []string{
-				"🔴 Бот: не в сети",
 				"🔴 Тоннель: остановлен",
 				"📦 Провайдер: не задан",
 				"🕒 Запущен: —",
@@ -156,7 +155,6 @@ func TestRenderStatus(t *testing.T) {
 				}
 			}(),
 			checks: []string{
-				"🟢 Бот: в сети",
 				"🟢 Тоннель: работает",
 				"🌐 Пинг DNS (9.9.9.9): 8ms",
 				"📦 Sing-Box: 🟢 работает",
@@ -176,7 +174,6 @@ func TestRenderStatus(t *testing.T) {
 				SingBoxRoute: "",
 			},
 			checks: []string{
-				"🔴 Бот: не в сети",
 				"🔴 Тоннель: остановлен",
 				"📦 Провайдер: tm · 456",
 				"🔢 Код выхода: 1",
@@ -198,7 +195,6 @@ func TestRenderStatus(t *testing.T) {
 				}
 			}(),
 			checks: []string{
-				"🟢 Бот: в сети",
 				"🟢 Тоннель: работает",
 				"🌐 Пинг DNS (9.9.9.9): timeout",
 				"📦 Sing-Box: 🔴 не отвечает",
@@ -218,7 +214,6 @@ func TestRenderStatus(t *testing.T) {
 				}
 			}(),
 			checks: []string{
-				"🟢 Бот: в сети",
 				"🟢 Тоннель: работает",
 				"📦 Sing-Box: 🟢 работает",
 				"🔀 Маршрут: direct",
@@ -546,5 +541,47 @@ func TestClearProviderRemovesFile(t *testing.T) {
 	}
 	if _, err := os.Stat("last_provider.json"); !os.IsNotExist(err) {
 		t.Fatalf("expected last_provider.json removed after ClearProvider, got err=%v", err)
+	}
+}
+
+func TestSetRouteAwgNotConfigured(t *testing.T) {
+	l := logger.New(true)
+	ctrl := controller.New(&config.Config{IsClient: true, SleepOnError: 1}, l, &fakeSingBox{})
+
+	err := ctrl.SetRoute(singbox.ModeAwg)
+	if err == nil {
+		t.Fatal("expected error when awg is not configured")
+	}
+	if !strings.Contains(err.Error(), "awg") {
+		t.Errorf("error = %q, want to mention awg", err.Error())
+	}
+	if ctrl.Status().ManualDirect {
+		t.Error("expected ManualDirect false when SetRoute(awg) failed")
+	}
+}
+
+func TestSetRouteAwgManualOverrideFlag(t *testing.T) {
+	// Fake the uci binary so AwgPresent sees an amneziawg interface.
+	fakeBin := t.TempDir()
+	uci := filepath.Join(fakeBin, "uci")
+	if err := os.WriteFile(uci, []byte("#!/bin/sh\necho amneziawg\n"), 0o755); err != nil {
+		t.Fatalf("write fake uci: %v", err)
+	}
+	t.Setenv("PATH", fakeBin+string(os.PathListSeparator)+os.Getenv("PATH"))
+
+	l := logger.New(true)
+	ctrl := controller.New(&config.Config{IsClient: true, SleepOnError: 1, AwgIface: "awg0"}, l, &fakeSingBox{})
+
+	if err := ctrl.SetRoute(singbox.ModeAwg); err != nil {
+		t.Fatalf("SetRoute(awg) failed with fake uci: %v", err)
+	}
+	if !ctrl.Status().ManualDirect {
+		t.Error("expected ManualDirect true after SetRoute(awg)")
+	}
+	if err := ctrl.SetRoute(singbox.ModeProxy); err != nil {
+		t.Fatalf("SetRoute(proxy) failed: %v", err)
+	}
+	if ctrl.Status().ManualDirect {
+		t.Error("expected ManualDirect false after SetRoute(proxy)")
 	}
 }

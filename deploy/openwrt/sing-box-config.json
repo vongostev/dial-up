@@ -22,6 +22,12 @@
       "tag": "tproxy-in",
       "listen": "0.0.0.0",
       "listen_port": 2080
+    },
+    {
+      "type": "direct",
+      "tag": "dns-in",
+      "listen": "127.0.0.1",
+      "listen_port": 5353
     }
   ],
   "outbounds": [
@@ -37,10 +43,21 @@
       "domain_resolver": "yandex"
     },
     {
+      "type": "direct",
+      "tag": "awg",
+      "bind_interface": "awg0",
+      "routing_mark": 2,
+      "domain_resolver": "yandex"
+    },
+    {
       "type": "selector",
       "tag": "route-select",
       "default": "direct",
-      "outbounds": ["proxy", "direct"]
+      "outbounds": [
+        "proxy",
+        "awg",
+        "direct"
+      ]
     }
   ],
   "route": {
@@ -58,7 +75,18 @@
         "timeout": "300ms"
       },
       {
-        "domain_suffix": ["local", ".lan", ".internal"],
+        "action": "hijack-dns",
+        "protocol": "dns",
+        "inbound": [
+          "dns-in"
+        ]
+      },
+      {
+        "domain_suffix": [
+          "local",
+          ".lan",
+          ".internal"
+        ],
         "action": "route",
         "outbound": "direct"
       },

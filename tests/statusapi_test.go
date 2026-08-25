@@ -149,6 +149,7 @@ func TestRouteHandlerValid(t *testing.T) {
 	}{
 		{mode: "direct"},
 		{mode: "proxy"},
+		{mode: "awg"},
 	}
 
 	for _, tt := range tests {

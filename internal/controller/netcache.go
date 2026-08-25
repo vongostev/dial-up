@@ -27,6 +27,18 @@ type netSnapshot struct {
 	sbRoute    string
 	hasRTT     bool
 	rttMs      int
+
+	// AmneziaWG state (client mode, AWG enabled/configured).
+	awgInterfaces []string // all UCI amneziawg interfaces
+	awgIface      string   // resolved interface (override or single detected)
+	hasAwgPresent bool
+	awgPresent    bool
+	hasAwg        bool
+	awgOnline     bool
+
+	// Direct-internet probe (client mode, PROBE_URL set).
+	hasProbe     bool
+	directOnline bool
 }
 
 // netCache caches network diagnostics with background refresh.
@@ -37,6 +49,13 @@ type netCache struct {
 	l        logger.Logger
 	stop     chan struct{}
 	stopOnce sync.Once
+
+	// awgOverride pins the AmneziaWG interface (AWG_IFACE); empty = auto-detect.
+	awgOverride string
+	// awgMaxAge is the handshake-freshness threshold for "online".
+	awgMaxAge time.Duration
+	// probeURL is the direct-internet probe target (PROBE_URL); empty disables.
+	probeURL string
 }
 
 // newNetCache creates a netCache that will refresh PingDNS and sing-box status.
@@ -106,6 +125,28 @@ func (nc *netCache) refresh(ctx context.Context) {
 				cl.Debug("controller", "Delay test skipped or failed", logger.Block("Collect"), logger.Status("SKIP"), logger.Importance(3), logger.Int("rtt", rtt), logger.Error(err))
 			}
 		}
+	}
+
+	// then record presence and handshake liveness.
+	if nc.isClient {
+		detected := AwgInterfaces(ctx)
+		snap.awgInterfaces = detected
+		snap.awgIface = ResolveAwgIface(nc.awgOverride, detected)
+		if snap.awgIface != "" {
+			snap.hasAwgPresent = true
+			snap.awgPresent = AwgPresent(ctx, snap.awgIface)
+			if snap.awgPresent {
+				snap.hasAwg = true
+				snap.awgOnline = AwgOnline(ctx, snap.awgIface, nc.awgMaxAge)
+			}
+		}
+		cl.Debug("controller", "AWG diagnostics collected", logger.Block("AwgCollect"), logger.Status("OK"), logger.Importance(4), logger.String("iface", snap.awgIface), logger.Bool("present", snap.awgPresent), logger.Bool("online", snap.awgOnline), logger.Int("interfaces", len(detected)))
+	}
+
+	if nc.isClient && nc.probeURL != "" {
+		snap.hasProbe = true
+		snap.directOnline = ProbeDirect(ctx, nc.probeURL)
+		cl.Debug("controller", "Direct-internet probe result", logger.Block("ProbeCollect"), logger.Status("OK"), logger.Importance(4), logger.Bool("directOnline", snap.directOnline), logger.String("url", nc.probeURL))
 	}
 
 	nc.current.Store(&snap)

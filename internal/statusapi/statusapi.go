@@ -127,10 +127,10 @@ func (s *Server) handler(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 
-		if body.Mode != singbox.ModeProxy && body.Mode != singbox.ModeDirect {
+		if body.Mode != singbox.ModeProxy && body.Mode != singbox.ModeAwg && body.Mode != singbox.ModeDirect {
 			w.Header().Set("Content-Type", "application/json")
 			w.WriteHeader(http.StatusBadRequest)
-			_, _ = w.Write([]byte(`{"error":"invalid mode: must be 'proxy' or 'direct'"}`))
+			_, _ = w.Write([]byte(`{"error":"invalid mode: must be 'proxy', 'awg' or 'direct'"}`))
 			return
 		}
 

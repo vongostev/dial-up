@@ -12,3 +12,20 @@ last_provider.json
 stripmarkup
 .gitignore
 .githooks/post-merge
+AGENTS.md
+.juggler
+travel_router.conf
+.gopath/
+.gocache/
+plans/
+
+# Private scratch / diagnostics (may contain real network data — never commit)
+/diag_*.sh
+/fix_*.sh
+/wd_*.sh
+/plan-*.md
+/singbox-*.json
+*.router.conf
+/.wt-main/
+/.scrub-rules.txt
+

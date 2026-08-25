@@ -63,7 +63,7 @@ func TestGuardianAliveDirectNoOp(t *testing.T) {
 	l := logger.New(true)
 	sb := &fakeSB{alive: true, route: singbox.ModeDirect}
 	fw := &fakeFW{}
-	g := newTproxyGuardian(sb, fw, l, nil)
+	g := newTproxyGuardian(sb, fw, l, nil, nil, nil)
 
 	g.check(context.Background())
 
@@ -85,7 +85,7 @@ func TestGuardianDeadFirstTickSetsDownSince(t *testing.T) {
 	l := logger.New(true)
 	sb := &fakeSB{alive: false}
 	fw := &fakeFW{}
-	g := newTproxyGuardian(sb, fw, l, nil)
+	g := newTproxyGuardian(sb, fw, l, nil, nil, nil)
 
 	g.check(context.Background())
 
@@ -104,7 +104,7 @@ func TestGuardianDeadPastThresholdFlushes(t *testing.T) {
 	l := logger.New(true)
 	sb := &fakeSB{alive: false}
 	fw := &fakeFW{}
-	g := newTproxyGuardian(sb, fw, l, nil)
+	g := newTproxyGuardian(sb, fw, l, nil, nil, nil)
 	// Simulate that death was detected 15s ago — past the 10s threshold.
 	g.downSince = time.Now().Add(-15 * time.Second)
 
@@ -122,7 +122,7 @@ func TestGuardianRecoveryReloads(t *testing.T) {
 	l := logger.New(true)
 	sb := &fakeSB{alive: true, route: singbox.ModeDirect}
 	fw := &fakeFW{}
-	g := newTproxyGuardian(sb, fw, l, nil)
+	g := newTproxyGuardian(sb, fw, l, nil, nil, nil)
 	// Pretend we previously flushed the chain.
 	g.flushed = true
 	g.downSince = time.Now().Add(-30 * time.Second)
@@ -150,7 +150,7 @@ func TestGuardianProxyPortOpenNoDemote(t *testing.T) {
 	l := logger.New(true)
 	sb := &fakeSB{alive: true, route: singbox.ModeProxy}
 	fw := &fakeFW{}
-	g := newTproxyGuardian(sb, fw, l, nil)
+	g := newTproxyGuardian(sb, fw, l, nil, nil, nil)
 	g.socksAddr = ln.Addr().String()
 
 	g.check(context.Background())
@@ -173,7 +173,7 @@ func TestGuardianProxyPortClosedDemotes(t *testing.T) {
 	sb := &fakeSB{alive: true, route: singbox.ModeProxy}
 	fw := &fakeFW{}
 	demoted := false
-	g := newTproxyGuardian(sb, fw, l, func(_ context.Context) { demoted = true })
+	g := newTproxyGuardian(sb, fw, l, func(_ context.Context) { demoted = true }, func() bool { return true }, nil)
 	g.socksAddr = closedAddr
 
 	g.check(context.Background())
@@ -186,5 +186,107 @@ func TestGuardianProxyPortClosedDemotes(t *testing.T) {
 	}
 	if !demoted {
 		t.Error("expected onDemote callback to fire after demotion")
+	}
+}
+
+func TestGuardianProxyPortClosedDemotesToAwg(t *testing.T) {
+	ln, err := (&net.ListenConfig{}).Listen(context.Background(), "tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	closedAddr := ln.Addr().String()
+	_ = ln.Close()
+
+	l := logger.New(true)
+	sb := &fakeSB{alive: true, route: singbox.ModeProxy}
+	fw := &fakeFW{}
+	g := newTproxyGuardian(sb, fw, l, nil, func() bool { return true }, func() bool { return true })
+	g.socksAddr = closedAddr
+
+	g.check(context.Background())
+
+	if sb.setCnt != 1 {
+		t.Errorf("expected 1 SetRoute call, got %d", sb.setCnt)
+	}
+	if sb.setRoute != singbox.ModeAwg {
+		t.Errorf("expected SetRoute(\"awg\") when probe OK and awg usable, got %q", sb.setRoute)
+	}
+}
+
+func TestGuardianProxyPortClosedDemotesDirectWhenAwgDown(t *testing.T) {
+	ln, err := (&net.ListenConfig{}).Listen(context.Background(), "tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	closedAddr := ln.Addr().String()
+	_ = ln.Close()
+
+	l := logger.New(true)
+	sb := &fakeSB{alive: true, route: singbox.ModeProxy}
+	fw := &fakeFW{}
+	g := newTproxyGuardian(sb, fw, l, nil, func() bool { return true }, func() bool { return false })
+	g.socksAddr = closedAddr
+
+	g.check(context.Background())
+
+	if sb.setCnt != 1 {
+		t.Errorf("expected 1 SetRoute call, got %d", sb.setCnt)
+	}
+	if sb.setRoute != singbox.ModeDirect {
+		t.Errorf("expected SetRoute(\"direct\") when awg unusable, got %q", sb.setRoute)
+	}
+}
+
+func TestGuardianProxyPortClosedProbeFailStaysOnProxy(t *testing.T) {
+	ln, err := (&net.ListenConfig{}).Listen(context.Background(), "tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	closedAddr := ln.Addr().String()
+	_ = ln.Close()
+
+	l := logger.New(true)
+	sb := &fakeSB{alive: true, route: singbox.ModeProxy}
+	fw := &fakeFW{}
+	g := newTproxyGuardian(sb, fw, l, nil, func() bool { return false }, func() bool { return true })
+	g.socksAddr = closedAddr
+
+	g.check(context.Background())
+
+	if sb.setCnt != 0 {
+		t.Errorf("expected 0 SetRoute calls when probe fails (stay on proxy), got %d (route=%q)", sb.setCnt, sb.setRoute)
+	}
+}
+
+func TestGuardianAwgWatchdogDemotesOnOffline(t *testing.T) {
+	l := logger.New(true)
+	sb := &fakeSB{alive: true, route: singbox.ModeAwg}
+	fw := &fakeFW{}
+	demoted := false
+	g := newTproxyGuardian(sb, fw, l, func(_ context.Context) { demoted = true }, nil, func() bool { return false })
+
+	g.check(context.Background())
+
+	if sb.setCnt != 1 {
+		t.Errorf("expected 1 SetRoute call, got %d", sb.setCnt)
+	}
+	if sb.setRoute != singbox.ModeDirect {
+		t.Errorf("expected SetRoute(\"direct\") when awg offline, got %q", sb.setRoute)
+	}
+	if !demoted {
+		t.Error("expected onDemote callback to fire after awg watchdog demotion")
+	}
+}
+
+func TestGuardianAwgWatchdogNoOpWhenOnline(t *testing.T) {
+	l := logger.New(true)
+	sb := &fakeSB{alive: true, route: singbox.ModeAwg}
+	fw := &fakeFW{}
+	g := newTproxyGuardian(sb, fw, l, nil, nil, func() bool { return true })
+
+	g.check(context.Background())
+
+	if sb.setCnt != 0 {
+		t.Errorf("expected 0 SetRoute calls when awg online, got %d", sb.setCnt)
 	}
 }

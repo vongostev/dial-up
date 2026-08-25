@@ -72,6 +72,18 @@ type Status struct {
 	ManualDirect   bool               `json:"manual_direct"`
 	TunnelRTTMs    *int               `json:"tunnel_rtt_ms"`
 	Peers          int                `json:"peers"`
+	// AwgIface is the resolved AmneziaWG interface (empty when none).
+	AwgIface string `json:"awg_iface"`
+	// AwgInterfaces lists all UCI amneziawg interfaces on the router.
+	AwgInterfaces []string `json:"awg_interfaces"`
+	// AwgPresent reports whether the resolved awg interface is configured.
+	AwgPresent bool `json:"awg_present"`
+	// AwgOnline reports awg handshake freshness (nil when awg absent).
+	AwgOnline *bool `json:"awg_online"`
+	// DirectOnline reports whether direct internet is available via probe (nil before first refresh).
+	DirectOnline *bool `json:"direct_online"`
+	// TunnelHalted is true when the probe halted olcrtc to save traffic.
+	TunnelHalted bool `json:"tunnel_halted"`
 }
 
 // Controller manages the olcrtc subprocess lifecycle in a single goroutine loop.
@@ -103,23 +115,43 @@ type Controller struct {
 	sig  chan struct{}
 
 	manualDirect bool
+	haltTunnel   bool
 }
 
 // New creates a Controller with the given config and logger.
 func New(cfg *config.Config, l logger.Logger, singbox singbox.Controller) *Controller {
+	nc := newNetCache(singbox, cfg.IsClient, l)
+	nc.awgOverride = cfg.AwgIface
+	nc.awgMaxAge = cfg.AwgHandshakeMaxAge()
+	nc.probeURL = cfg.ProbeURL
+
 	c := &Controller{
 		cfg:      cfg,
 		l:        l,
 		singbox:  singbox,
-		netCache: newNetCache(singbox, cfg.IsClient, l),
+		netCache: nc,
 
 		done: make(chan struct{}),
 		sig:  make(chan struct{}, 1),
 	}
 	// The tproxy health guardian is a client-only concern: only the OpenWrt router
 	// runs the nft tproxy redirect and sing-box. It refreshes netCache on demotion.
+	// awgOK reports whether the awg route is currently usable (present + online),
+	// read from the cached diagnostics so the 10s guardian tick does not exec.
 	if cfg.IsClient {
-		c.guardian = newTproxyGuardian(singbox, firewall.New(l), l, c.netCache.refresh)
+		c.guardian = newTproxyGuardian(singbox, firewall.New(l), l, c.netCache.refresh,
+			// probeOK: switching away from the tunnel is only allowed when direct
+			// internet works without it (the tunnel may flap otherwise).
+			func() bool {
+				ns := nc.get()
+				return ns.hasProbe && ns.directOnline
+			},
+			// awgOK: the awg route is usable only when present + online.
+			func() bool {
+				ns := nc.get()
+				return ns.awgPresent && ns.awgOnline
+			},
+		)
 	}
 	return c
 }
@@ -246,13 +278,22 @@ func (c *Controller) SetRoute(mode string) error {
 	}
 	cl := c.l.With(logger.Function("Controller.SetRoute"))
 
+	if mode == singbox.ModeAwg {
+		iface := c.resolveAwgIface(context.Background())
+		if iface == "" || !AwgPresent(context.Background(), iface) {
+			cl.Warn("controller", "AWG route requested but no interface configured", logger.Block("AwgGuard"), logger.Status("FAIL"), logger.Importance(6), logger.String("iface", iface))
+			return fmt.Errorf("awg: no AmneziaWG interface configured on this router")
+		}
+	}
+
+	// (suppressing auto-promote and probe-driven halt); proxy resumes auto.
 	c.mu.Lock()
-	if mode == singbox.ModeDirect {
-		c.manualDirect = true
-		cl.Info("controller", "Manual DIRECT lock set, auto-promote suppressed", logger.Block("SetManualFlag"), logger.Status("OK"), logger.Importance(7))
-	} else {
+	if mode == singbox.ModeProxy {
 		c.manualDirect = false
-		cl.Info("controller", "Manual DIRECT lock cleared, auto-promote resumed", logger.Block("SetManualFlag"), logger.Status("OK"), logger.Importance(7))
+		cl.Info("controller", "Manual route lock cleared, auto mode resumed", logger.Block("SetManualFlag"), logger.Status("OK"), logger.Importance(7))
+	} else {
+		c.manualDirect = true
+		cl.Info("controller", "Manual route lock set, auto mode suppressed", logger.Block("SetManualFlag"), logger.Status("OK"), logger.Importance(7), logger.String("mode", mode))
 	}
 	c.mu.Unlock()
 
@@ -261,6 +302,24 @@ func (c *Controller) SetRoute(mode string) error {
 	}
 	go c.netCache.refresh(context.Background())
 	return nil
+}
+
+// detected amneziawg interface; "" when none or ambiguous.
+
+// resolveAwgIface returns the interface to use, or "" when not resolvable.
+func (c *Controller) resolveAwgIface(ctx context.Context) string {
+	if c.cfg.AwgIface != "" {
+		return c.cfg.AwgIface
+	}
+	return ResolveAwgIface("", AwgInterfaces(ctx))
+}
+
+// standingTarget returns the route used when direct internet is available.
+func (c *Controller) standingTarget(ns netSnapshot) string {
+	if c.cfg.AwgPreferred() && ns.awgOnline {
+		return singbox.ModeAwg
+	}
+	return singbox.ModeDirect
 }
 
 // - alive: true if VK long-poll is connected and running
@@ -301,6 +360,7 @@ func (c *Controller) snapshot() Status {
 		VkAlive:        c.vkAlive.Load(),
 		ManualDirect:   c.manualDirect,
 		Peers:          c.peers,
+		TunnelHalted:   c.haltTunnel,
 	}
 	if c.provider != nil {
 		s.Provider = new(*c.provider)
@@ -316,6 +376,20 @@ func (c *Controller) snapshot() Status {
 
 		if ns.hasRTT {
 			s.TunnelRTTMs = new(ns.rttMs)
+		}
+	}
+
+	if c.cfg.IsClient {
+		s.AwgIface = ns.awgIface
+		s.AwgInterfaces = ns.awgInterfaces
+		if ns.hasAwgPresent {
+			s.AwgPresent = ns.awgPresent
+		}
+		if ns.hasAwg {
+			s.AwgOnline = new(ns.awgOnline)
+		}
+		if ns.hasProbe {
+			s.DirectOnline = new(ns.directOnline)
 		}
 	}
 
@@ -362,124 +436,141 @@ func (c *Controller) loop(ctx context.Context) {
 			// for up to 60s. Now mutex is released BEFORE select — SetProvider and waitCmd can signal freely.
 			c.mu.Lock()
 
+			// Cached diagnostics are read lock-free (atomic.Pointer) even under c.mu.
+			ns := c.netCache.get()
 			tunnelAlive := c.cmd != nil
 			wait := idleTimeout
 
-			if tunnelAlive {
-				if c.restarting {
-					cl.Info("controller", "Restarting: terminating process", logger.Block("LoopTick"), logger.Status("ATTEMPT"), logger.Importance(6))
-					if c.cmd.Process != nil {
-						_ = c.cmd.Process.Signal(syscall.SIGTERM)
-						proc := c.cmd.Process
-						go func() {
-							time.Sleep(time.Second)
-							proc.Kill()
-						}()
-					}
-					// waitCmd goroutine for the same cmd also calls cmd.Wait(). The loop's Wait()
-					// blocks until process exits, ensuring c.cmd=nil is set before we release the lock.
-					// waitCmd's own Wait() returns immediately after (Go Process.Wait is mutex-guarded)
-					// and skips its state update because c.cmd != cmd.
-					_ = c.cmd.Wait()
-					c.cmd = nil
+			// route (awg if preferred + online, else direct) and halt olcrtc to save
+			// mobile traffic. Only in client mode with an awg interface present and no
+			// manual route lock (manual choices disable the probe-driven halt).
+			if c.cfg.IsClient && ns.awgPresent && !c.manualDirect && ns.hasProbe && ns.directOnline {
+				if !c.haltTunnel {
+					c.haltTunnel = true
+					cl.Info("controller", "Direct internet available, halting olcrtc (traffic saving)", logger.Block("ProbeStanding"), logger.Status("OK"), logger.Importance(7))
+				}
+				target := c.standingTarget(ns)
+				if tunnelAlive {
+					c.terminateProcess()
 					wait = time.Second
-				} else {
-					wait = 10 * time.Second
-					// Process survived >30s — consider it healthy
-					if c.startedAt != nil && time.Since(*c.startedAt) > 30*time.Second {
-						// Reset backoff counters only if there were prior failures
-						if c.failures > 0 {
-							cl.Info("controller", "Process stable, resetting backoff", logger.Block("LoopTick"), logger.Status("OK"), logger.Importance(4), logger.Any("uptime", time.Since(*c.startedAt).String()))
-							c.failures = 0
-							c.crashFailures = 0
-							c.lastError = ""
-						}
-
-						// Previously gated by c.failures > 0, so promotion never fired on
-						// first successful start (failures == 0). Now promotes unconditionally on >30s
-						// stability so the route is never stuck at "direct" on a healthy first run.
-						// manualDirect flag suppresses auto-promote so a user-requested DIRECT
-						// sticks permanently until the user (or another /route call) switches back to proxy.
-						if c.cfg.IsClient && !c.manualDirect {
-							cl.Info("controller", "Promoting to proxy route", logger.Block("LoopTick"), logger.Status("ATTEMPT"), logger.Importance(6))
-							if err := c.singbox.SetRoute(singbox.ModeProxy); err != nil {
-								cl.Warn("controller", "Failed to set proxy route, will retry", logger.Block("LoopTick"), logger.Status("FAIL"), logger.Importance(6), logger.Error(err))
-							}
-						}
+				}
+				if ns.sbRoute != target {
+					cl.Info("controller", "Setting standing route", logger.Block("ProbeStanding"), logger.Status("ATTEMPT"), logger.Importance(6), logger.String("target", target))
+					if err := c.singbox.SetRoute(target); err != nil {
+						cl.Warn("controller", "Failed to set standing route", logger.Block("ProbeStanding"), logger.Status("FAIL"), logger.Importance(6), logger.Error(err))
+					} else {
+						go c.netCache.refresh(context.Background())
 					}
 				}
 			} else {
-				c.restarting = false
-				if c.provider != nil {
-					cl.Info("controller", "Starting new process", logger.Block("LoopTick"), logger.Status("ATTEMPT"), logger.Importance(6))
-					configContent := RenderConfig(RenderParams{
-						IsClient:       c.cfg.IsClient,
-						Provider:       c.provider.Kind,
-						RoomID:         c.provider.RoomID,
-						OlcrtcKey:      c.cfg.OlcrtcKey,
-						SocksProxyAddr: c.cfg.SocksProxyAddr,
-						SocksProxyPort: c.cfg.SocksProxyPort,
-						SocksProxyUser: c.cfg.SocksProxyUser,
-						SocksProxyPass: c.cfg.SocksProxyPass,
-						NetDNS:         c.cfg.NetDNS,
-					})
-					configFile := "cnc.yaml"
-					if !c.cfg.IsClient {
-						configFile = "srv.yaml"
-					}
-					if err := os.WriteFile(configFile, []byte(configContent), 0600); err != nil {
-						cl.Error("controller", "Failed to write config", logger.Block("LoopTick"), logger.Status("FAIL"), logger.Importance(8), logger.Error(err))
-						c.lastError = err.Error()
-						c.failures++
-						locked = false
-						c.mu.Unlock()
-						return
-					}
-					// A fresh olcrtc process starts with zero peers; its first
-					// "Current peers count" line (or the absence of one) re-establishes it.
-					c.peers = 0
-					cmd := exec.Command(c.cfg.OlcrtcExe, configFile)
-					// surface in logs and /s instead of being discarded. os.Pipe gives the child a real fd.
-					pr, pw, err := os.Pipe()
-					if err != nil {
-						cl.Error("controller", "Failed to create subprocess pipe", logger.Block("LoopTick"), logger.Status("FAIL"), logger.Importance(8), logger.Error(err))
-						c.lastError = err.Error()
-						c.failures++
-						locked = false
-						c.mu.Unlock()
-						return
-					}
-					cmd.Stdout = pw
-					cmd.Stderr = pw
-					if err := cmd.Start(); err != nil {
-						_ = pr.Close()
-						_ = pw.Close()
-						cl.Error("controller", "Failed to start subprocess", logger.Block("LoopTick"), logger.Status("FAIL"), logger.Importance(8), logger.Error(err))
-						c.lastError = err.Error()
-						c.failures++
-						locked = false
-						c.mu.Unlock()
-						return
-					}
-					// Parent no longer needs the write end; the child owns its own copy of the fd.
-					_ = pw.Close()
-					wg := &sync.WaitGroup{}
-					wg.Add(1)
-					c.cmd = cmd
-					c.streamWg = wg
-					c.lastOutput = ""
-					c.startedAt = new(time.Now())
-					c.stoppedAt = nil
-					c.lastExitCode = nil
-					c.lastError = ""
-					go c.streamSubprocess(pr, wg)
-					go c.waitCmd(cmd)
-					wait = 3 * time.Second
+				// resume the tunnel and apply the regular lifecycle logic.
+				if c.haltTunnel {
+					c.haltTunnel = false
+					cl.Info("controller", "Probe offline or manual override, tunnel resumed", logger.Block("ProbeResume"), logger.Status("OK"), logger.Importance(7))
 				}
-				if c.savePending {
-					c.savePending = false
+				if tunnelAlive {
+					if c.restarting {
+						cl.Info("controller", "Restarting: terminating process", logger.Block("LoopTick"), logger.Status("ATTEMPT"), logger.Importance(6))
+						c.terminateProcess()
+						wait = time.Second
+					} else {
+						wait = 10 * time.Second
+						// Process survived >30s — consider it healthy
+						if c.startedAt != nil && time.Since(*c.startedAt) > 30*time.Second {
+							// Reset backoff counters only if there were prior failures
+							if c.failures > 0 {
+								cl.Info("controller", "Process stable, resetting backoff", logger.Block("LoopTick"), logger.Status("OK"), logger.Importance(4), logger.Any("uptime", time.Since(*c.startedAt).String()))
+								c.failures = 0
+								c.crashFailures = 0
+								c.lastError = ""
+							}
+
+							// Previously gated by c.failures > 0, so promotion never fired on
+							// first successful start (failures == 0). Now promotes unconditionally on >30s
+							// stability so the route is never stuck at "direct" on a healthy first run.
+							// manualDirect flag suppresses auto-promote so a user-requested DIRECT
+							// sticks permanently until the user (or another /route call) switches back to proxy.
+							if c.cfg.IsClient && !c.manualDirect {
+								cl.Info("controller", "Promoting to proxy route", logger.Block("LoopTick"), logger.Status("ATTEMPT"), logger.Importance(6))
+								if err := c.singbox.SetRoute(singbox.ModeProxy); err != nil {
+									cl.Warn("controller", "Failed to set proxy route, will retry", logger.Block("LoopTick"), logger.Status("FAIL"), logger.Importance(6), logger.Error(err))
+								}
+							}
+						}
+					}
+				} else {
+					c.restarting = false
 					if c.provider != nil {
-						SaveLastProvider(c.cfg.LastProviderFile, *c.provider, c.l)
+						cl.Info("controller", "Starting new process", logger.Block("LoopTick"), logger.Status("ATTEMPT"), logger.Importance(6))
+						configContent := RenderConfig(RenderParams{
+							IsClient:       c.cfg.IsClient,
+							Provider:       c.provider.Kind,
+							RoomID:         c.provider.RoomID,
+							OlcrtcKey:      c.cfg.OlcrtcKey,
+							SocksProxyAddr: c.cfg.SocksProxyAddr,
+							SocksProxyPort: c.cfg.SocksProxyPort,
+							SocksProxyUser: c.cfg.SocksProxyUser,
+							SocksProxyPass: c.cfg.SocksProxyPass,
+							NetDNS:         c.cfg.NetDNS,
+						})
+						configFile := "cnc.yaml"
+						if !c.cfg.IsClient {
+							configFile = "srv.yaml"
+						}
+						if err := os.WriteFile(configFile, []byte(configContent), 0600); err != nil {
+							cl.Error("controller", "Failed to write config", logger.Block("LoopTick"), logger.Status("FAIL"), logger.Importance(8), logger.Error(err))
+							c.lastError = err.Error()
+							c.failures++
+							locked = false
+							c.mu.Unlock()
+							return
+						}
+						// A fresh olcrtc process starts with zero peers; its first
+						// "Current peers count" line (or the absence of one) re-establishes it.
+						c.peers = 0
+						cmd := exec.Command(c.cfg.OlcrtcExe, configFile)
+						// surface in logs and /s instead of being discarded. os.Pipe gives the child a real fd.
+						pr, pw, err := os.Pipe()
+						if err != nil {
+							cl.Error("controller", "Failed to create subprocess pipe", logger.Block("LoopTick"), logger.Status("FAIL"), logger.Importance(8), logger.Error(err))
+							c.lastError = err.Error()
+							c.failures++
+							locked = false
+							c.mu.Unlock()
+							return
+						}
+						cmd.Stdout = pw
+						cmd.Stderr = pw
+						if err := cmd.Start(); err != nil {
+							_ = pr.Close()
+							_ = pw.Close()
+							cl.Error("controller", "Failed to start subprocess", logger.Block("LoopTick"), logger.Status("FAIL"), logger.Importance(8), logger.Error(err))
+							c.lastError = err.Error()
+							c.failures++
+							locked = false
+							c.mu.Unlock()
+							return
+						}
+						// Parent no longer needs the write end; the child owns its own copy of the fd.
+						_ = pw.Close()
+						wg := &sync.WaitGroup{}
+						wg.Add(1)
+						c.cmd = cmd
+						c.streamWg = wg
+						c.lastOutput = ""
+						c.startedAt = new(time.Now())
+						c.stoppedAt = nil
+						c.lastExitCode = nil
+						c.lastError = ""
+						go c.streamSubprocess(pr, wg)
+						go c.waitCmd(cmd)
+						wait = 3 * time.Second
+					}
+					if c.savePending {
+						c.savePending = false
+						if c.provider != nil {
+							SaveLastProvider(c.cfg.LastProviderFile, *c.provider, c.l)
+						}
 					}
 				}
 			}
@@ -619,22 +710,49 @@ func (c *Controller) waitCmd(cmd *exec.Cmd) {
 				cl.Warn("controller", "Subprocess crashed", logger.Block("ExitEval"), logger.Status("FAIL"), logger.Importance(8), logger.Any("exit_code", code), logger.Int("failures", c.failures), logger.Int("crashFailures", c.crashFailures), logger.String("captured", msg), logger.String("class", "transient"))
 			}
 
-			// Best-effort demote to direct route so LAN keeps internet access when olcrtc is down.
-			if c.cfg.IsClient {
-				if err := c.singbox.SetRoute(singbox.ModeDirect); err != nil {
-					cl.Warn("controller", "Failed to set direct route after crash", logger.Block("ExitEval"), logger.Status("FAIL"), logger.Importance(6), logger.Error(err))
-				}
-			}
+			// |:NOTE: No route demotion on tunnel crash — the olcrtc tunnel may be
+			// unstable (flapping); the selector stays on proxy and the loop restarts
+			// the tunnel with backoff. Switching away from proxy is gated on the
+			// direct-internet probe (loop ProbeStanding / guardian PortCheckDemote).
 		} else {
 			cl.Info("controller", "Subprocess exited cleanly", logger.Block("ExitEval"), logger.Status("OK"), logger.Importance(5))
 		}
 	}
 	c.mu.Unlock()
 
+	// |:NOTE: No route demotion on tunnel crash — the olcrtc tunnel may be unstable
+	// (flapping), and switching away from proxy is only allowed when the direct-internet
+	// probe succeeds (handled by the loop's ProbeStanding branch and the guardian's
+	// PortCheckDemote, both gated on the probe). Here the selector stays on proxy and
+	// the loop restarts the tunnel with backoff.
+
 	select {
 	case c.sig <- struct{}{}:
 	default:
 	}
+}
+
+// terminateProcess stops the running subprocess (SIGTERM → Kill → Wait).
+func (c *Controller) terminateProcess() {
+	cl := c.l.With(logger.Function("Controller.terminateProcess"))
+	if c.cmd == nil || c.cmd.Process == nil {
+		return
+	}
+	cl.Info("controller", "Terminating subprocess", logger.Block("TerminateProcess"), logger.Status("ATTEMPT"), logger.Importance(6))
+	_ = c.cmd.Process.Signal(syscall.SIGTERM)
+	proc := c.cmd.Process
+	go func() {
+		time.Sleep(time.Second)
+		proc.Kill()
+	}()
+	// waitCmd goroutine for the same cmd also calls cmd.Wait(). The loop's Wait()
+	// blocks until process exits, ensuring c.cmd=nil is set before we release the lock.
+	// waitCmd's own Wait() returns immediately after (Go Process.Wait is mutex-guarded)
+	// and skips its state update because c.cmd != cmd.
+	_ = c.cmd.Wait()
+	c.cmd = nil
+	c.stoppedAt = new(time.Now())
+	cl.Info("controller", "Subprocess terminated", logger.Block("TerminateProcess"), logger.Status("OK"), logger.Importance(6))
 }
 
 // streamSubprocess drains the subprocess pipe, logging each line and retaining the last non-empty one.

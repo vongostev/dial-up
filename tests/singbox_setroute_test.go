@@ -21,6 +21,7 @@ func TestSetRouteValid(t *testing.T) {
 		mode string
 	}{
 		{singbox.ModeProxy},
+		{singbox.ModeAwg},
 		{singbox.ModeDirect},
 	}
 

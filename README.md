@@ -18,9 +18,14 @@ graph LR
         direction TB
         LAN["Устройство (LAN)"]
         TPROXY["tproxy (nftables)"]
-        SINGBOX["sing-box (selector)"]
+        SINGBOX["sing-box (route-select)"]
         OLCRTC_C["olcrtc client (SOCKS5)"]
-        LAN --> TPROXY --> SINGBOX --> OLCRTC_C
+        AWG["AmneziaWG (awg0)"]
+        DIRECT["Прямой интернет (оператор)"]
+        LAN --> TPROXY --> SINGBOX
+        SINGBOX -->|proxy| OLCRTC_C
+        SINGBOX -->|awg| AWG
+        SINGBOX -->|direct| DIRECT
     end
 
     subgraph server["Сервер-роутер (домашняя сеть)"]
@@ -65,7 +70,7 @@ graph LR
 ## Быстрая установка (на роутере, без компьютера)
 
 ```bash
-sh -c "$(wget -qO- https://raw.githubusercontent.com/vongostev/OlcRTC-OpenWRT-VK-Bot/main/install.sh)"
+sh -c "$(wget -qO- https://raw.githubusercontent.com/vongostev/dial-up/main/install.sh)"
 ```
 
 Скрипт интерактивно запросит `VK_TOKEN` и `OLCRTC_KEY`, определит роль (клиент/сервер), установит бинарники, sing-box, tproxy-правила, LuCI-панель и запустит сервис.
@@ -108,7 +113,7 @@ make deploy client root@192.168.3.1 \
 
 На клиенте автоматически установятся sing-box, tproxy-правила и whitelist.
 
-> По умолчанию: тип `client`, хост `root@192.168.1.1`.
+> По умолчанию: тип `client`, хост `root@192.168.1.1`, порт `22`.
 
 ### Деплой сервера с upstream SOCKS5 (podkop)
 
@@ -127,7 +132,7 @@ make deploy server root@192.168.2.1 \
 ### Удаление
 
 ```bash
-make remove root@192.168.0.1
+make remove root@192.168.2.1
 ```
 
 Удаляет бинарники, init-скрипт, tproxy-правила, LuCI-приложение. Файл `/etc/dial-up.env` сохраняется.
@@ -157,6 +162,7 @@ make remove root@192.168.0.1
 | `/n` / "Stop" | Остановить туннель и удалить провайдера |
 | `/r` / "Restart" | Перезапустить туннель |
 | `/m proxy` / "Proxy" | Переключить маршрут через туннель |
+| `/m awg` / "AWG" | Переключить маршрут через AmneziaWG (кнопка только если AWG настроен) |
 | `/m direct` / "Direct" | Переключить маршрут напрямую |
 
 ### Автоматика
@@ -175,10 +181,43 @@ make remove root@192.168.0.1
 sing-box работает как постоянный сервис с outbound-селектором `route-select`:
 
 - **`direct`** (по умолчанию) — трафик идёт напрямую через оператора
+- **`awg`** — трафик идёт через AmneziaWG-интерфейс (появляется, если AWG настроен на роутере)
 - **`proxy`** — трафик идёт через olcRTC-туннель
 
-Правила tproxy активны всегда. Безопасность обеспечивается состоянием селектора: даже если туннель упал, трафик автоматически возвращается на `direct`.
+Правила tproxy активны всегда. Безопасность обеспечивается состоянием селектора: даже если туннель упал, трафик автоматически возвращается на fallback (`awg`, если онлайн, иначе `direct`).
 Белый список гарантирует прямой доступ к российским сервисам (Яндекс, ВК, Госуслуги, банки и т.д.) без туннеля.
+
+### AmneziaWG (awg) и экономия трафика
+
+Если на роутере настроен интерфейс AmneziaWG, бот автоматически:
+- определяет его (UCI `proto=amneziawg`; при нескольких интерфейсах задайте `AWG_IFACE`);
+- каждые 30с проверяет прямой доступ к `PROBE_URL` (по умолчанию `https://www.google.com/generate_204`);
+- если прямой доступ **есть** — переключает маршрут на режим по умолчанию (`DEFAULT_MODE`: `awg` или `direct`) и **останавливает olcrtc** (экономия мобильного трафика видеозвонка); провайдер сохраняется и туннель автоматически возобновляется, когда прямой доступ пропадёт;
+- если прямого доступа **нет** — поднимает olcRTC-туннель и маршрут `proxy`; при падении/нестабильности туннеля маршрут **остаётся на `proxy`** (туннель рестартует с backoff) — уходить с туннеля можно только при положительном probe прямого интернета.
+
+Ручной выбор маршрута (`/m`, клик в LuCI) отключает автоматику до возврата в `proxy`.
+
+### Настройка AmneziaWG на роутере
+
+Установите пакеты и пропишите конфиг пира одной командой (на роутере или через SSH):
+
+```bash
+wget -qO- https://raw.githubusercontent.com/vongostev/dial-up/main/deploy/openwrt/setup-amnezia-awg.sh | sh -s -- /path/to/peer.conf
+```
+
+Скрипт: ставит `kmod-amneziawg`/`amneziawg-tools`, парсит конфиг пира в UCI (`proto=amneziawg` с параметрами обфускации `awg_jc/jmin/jmax/s1/s2/h1/h2`), добавляет policy-routing `fwmark 0x2 → table 102` (через awg идёт только трафик sing-box-аутбаунда `awg`), зону firewall, прописывает `AWG_IFACE`/`DEFAULT_MODE=awg` в `/etc/dial-up.env` и обновляет конфиг sing-box.
+
+Также доступно: `AWG_CONF_URL=...` (скачать конфиг), `INTERACTIVE=1` (вставить конфиг вручную), `--skip-config` (интерфейс уже настроен через LuCI).
+
+### Корпоративный DNS через туннель (опционально)
+
+Если нужно резолвить корпоративные домены через корпоративный DNS-сервер, при этом путь DNS-запроса следует за активным режимом селектора (`awg`/`proxy`), есть отдельный скрипт:
+
+```bash
+CORP_DNS_SERVER=10.0.0.5 CORP_DOMAINS="corp.example intranet.example" sh deploy/openwrt/setup-tunnel-corp-dns.sh
+```
+
+Скрипт добавляет в sing-box `dns-in` (127.0.0.1:5353) и `corp-dns`-сервер с `detour: route-select`, прописывает dnsmasq-форвардинг корп-доменов и watchdog с автооткатом. Подробности — в [docs/tunnel-corp-dns.md](docs/tunnel-corp-dns.md).
 
 ---
 
@@ -189,8 +228,8 @@ sing-box работает как постоянный сервис с outbound-�
 | Вкладка | Возможности                                                                                                 |
 |---|-------------------------------------------------------------------------------------------------------------|
 | **Bot** | Роль (клиент/сервер), VK-токен, разрешённые пользователи, расширенные настройки (пути, backoff, DEBUG)       |
-| **Tunnel** | Подключение по URL провайдера, статус/метрики/диагностика туннеля, ключ шифрования (OLCRTC_KEY)             |
-| **Network** | **Клиент:** визуальная схема трафика, переключение маршрута (proxy/direct), whitelist-домены, диагностика tproxy/sing-box. **Сервер:** upstream SOCKS5 с тестом |
+| **Tunnel** | Подключение по URL провайдера, статус/метрики туннеля (RTT, DNS-пинг), диагностика, ключ шифрования (OLCRTC_KEY)             |
+| **Network** | **Клиент:** визуальная схема трафика, переключение маршрута (proxy/awg/direct), whitelist-домены, диагностика tproxy/sing-box. **Сервер:** upstream SOCKS5 с тестом |
 | **Logs** | Логи dial-up, olcrtc, sing-box с фильтрацией по источнику, поиском, автообновлением и скачиванием           |
 
 ![luci.png](luci.png)
@@ -213,6 +252,10 @@ sing-box работает как постоянный сервис с outbound-�
 | `SOCKS_PROXY_USER` | | Upstream SOCKS5 логин |
 | `SOCKS_PROXY_PASS` | | Upstream SOCKS5 пароль |
 | `NET_DNS` | `127.0.0.1:53` | Выходной DNS сервера (только сервер); `127.0.0.1:53` — через локальный podkop/sing-box |
+| `AWG_IFACE` | *(пусто)* | Интерфейс AmneziaWG для маршрута `awg`; пусто = автоопределение единственного amneziawg-интерфейса, при нескольких — задать явно (только клиент) |
+| `AWG_HANDSHAKE_MAX` | `180` | Макс. возраст handshake (сек) для «awg онлайн» (только клиент) |
+| `DEFAULT_MODE` | `direct` | Режим по умолчанию при доступном прямом интернете: `awg` или `direct` (только клиент) |
+| `PROBE_URL` | `https://www.google.com/generate_204` | Сайт для probe прямого интернета; 2xx/3xx = прямой доступ есть → olcrtc останавливается (экономия трафика); пусто = выкл (только клиент) |
 | `OLCRTC_EXE` | `/etc/olcrtc-linux-arm64` | Путь до бинарника olcrtc |
 | `DATA_DIR` | `data` | Рабочая директория |
 | `LAST_PROVIDER_FILE` | `last_provider.json` | Файл сохранения провайдера |
@@ -249,3 +292,4 @@ nft list chain inet fw4 singbox_tproxy
 - [Идейный вдохновитель - proxy_bot на Python](https://github.com/ivanovrvl/proxy_bot.git)
 - [Список ресурсов с гарантированным доступом](https://github.com/hxehex/russia-mobile-internet-whitelist/blob/main/whitelist.txt)
 - [Архитектура проекта](ARCHITECTURE.md)
+- [Корпоративный DNS через туннель](docs/tunnel-corp-dns.md)

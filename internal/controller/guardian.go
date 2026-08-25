@@ -35,17 +35,24 @@ type tproxyGuardian struct {
 	flushed   bool
 	onDemote  func(context.Context)
 	socksAddr string
-	stop      chan struct{}
-	stopOnce  sync.Once
+	// probeOK reports whether direct internet works without the tunnel; nil when
+	// the probe is disabled. Switching away from proxy is gated on it.
+	probeOK func() bool
+	// awgOK reports whether the awg route is usable (present + online); nil when disabled.
+	awgOK    func() bool
+	stop     chan struct{}
+	stopOnce sync.Once
 }
 
 // newTproxyGuardian creates a tproxyGuardian with the default interval, threshold, and SOCKS address.
-func newTproxyGuardian(sb singbox.Controller, fw firewall.Manager, l logger.Logger, onDemote func(context.Context)) *tproxyGuardian {
+func newTproxyGuardian(sb singbox.Controller, fw firewall.Manager, l logger.Logger, onDemote func(context.Context), probeOK func() bool, awgOK func() bool) *tproxyGuardian {
 	return &tproxyGuardian{
 		sb:        sb,
 		fw:        fw,
 		l:         l,
 		onDemote:  onDemote,
+		probeOK:   probeOK,
+		awgOK:     awgOK,
 		socksAddr: socksCheckAddr,
 		stop:      make(chan struct{}),
 	}
@@ -129,21 +136,48 @@ func (g *tproxyGuardian) check(ctx context.Context) {
 		g.downSince = time.Time{}
 	}
 
-	// If olcrtc's SOCKS listener is unreachable while sing-box still proxies to it, demote to
-	// "direct" so LAN keeps working, and refresh the netCache so /s reflects the demotion.
+	// The olcrtc tunnel may flap, so switching away from proxy is gated on the
+	// direct-internet probe: only when direct access works without the tunnel do we
+	// move to the standing route (awg if usable, else direct). While the probe fails,
+	// we stay on proxy and let the loop restart the tunnel (it is the only path out).
 	if sbStatus.Alive && sbStatus.Route == singbox.ModeProxy {
 		if !PortOpen(g.socksAddr, socksCheckTimeout) {
-			cl.Warn("controller", "olcrtc SOCKS port dead while selector=proxy, demoting to direct", logger.Block("PortCheckDemote"), logger.Status("ATTEMPT"), logger.Importance(8), logger.String("addr", g.socksAddr))
-			if err := g.sb.SetRoute(singbox.ModeDirect); err != nil {
-				cl.Error("controller", "Failed to demote selector to direct", logger.Block("PortCheckDemote"), logger.Status("FAIL"), logger.Importance(8), logger.Error(err))
+			if g.probeOK == nil || !g.probeOK() {
+				cl.Debug("controller", "SOCKS port dead but direct probe fails — staying on proxy", logger.Block("PortCheckDemote"), logger.Status("SKIP"), logger.Importance(5), logger.String("addr", g.socksAddr))
 			} else {
-				cl.Info("controller", "Selector demoted to direct", logger.Block("PortCheckDemote"), logger.Status("OK"), logger.Importance(7))
+				target := singbox.ModeDirect
+				if g.awgOK != nil && g.awgOK() {
+					target = singbox.ModeAwg
+				}
+				cl.Warn("controller", "olcrtc SOCKS port dead, direct access works — switching to standing route", logger.Block("PortCheckDemote"), logger.Status("ATTEMPT"), logger.Importance(8), logger.String("addr", g.socksAddr), logger.String("target", target))
+				if err := g.sb.SetRoute(target); err != nil {
+					cl.Error("controller", "Failed to switch selector", logger.Block("PortCheckDemote"), logger.Status("FAIL"), logger.Importance(8), logger.Error(err))
+				} else {
+					cl.Info("controller", "Selector switched to standing route", logger.Block("PortCheckDemote"), logger.Status("OK"), logger.Importance(7), logger.String("target", target))
+				}
+				if g.onDemote != nil {
+					g.onDemote(ctx)
+				}
+			}
+		} else {
+			cl.Debug("controller", "olcrtc SOCKS port alive, no demotion needed", logger.Block("PortCheckDemote"), logger.Status("OK"), logger.Importance(4))
+		}
+	}
+
+	// demote to direct so LAN keeps internet instead of blackholing into a dead tunnel.
+	if sbStatus.Alive && sbStatus.Route == singbox.ModeAwg && g.awgOK != nil {
+		if !g.awgOK() {
+			cl.Warn("controller", "AWG route selected but interface offline, demoting to direct", logger.Block("AwgWatchdog"), logger.Status("ATTEMPT"), logger.Importance(8))
+			if err := g.sb.SetRoute(singbox.ModeDirect); err != nil {
+				cl.Error("controller", "Failed to demote selector to direct", logger.Block("AwgWatchdog"), logger.Status("FAIL"), logger.Importance(8), logger.Error(err))
+			} else {
+				cl.Info("controller", "Selector demoted to direct (awg offline)", logger.Block("AwgWatchdog"), logger.Status("OK"), logger.Importance(7))
 			}
 			if g.onDemote != nil {
 				g.onDemote(ctx)
 			}
 		} else {
-			cl.Debug("controller", "olcrtc SOCKS port alive, no demotion needed", logger.Block("PortCheckDemote"), logger.Status("OK"), logger.Importance(4))
+			cl.Debug("controller", "AWG route online, no demotion needed", logger.Block("AwgWatchdog"), logger.Status("OK"), logger.Importance(4))
 		}
 	}
 }

@@ -214,7 +214,7 @@ func (b *Bot) handle(m wrapper.NewMessage) {
 	switch {
 	case text == "/menu" || text == "/start":
 		responseText = "Для управления используйте кнопки Status / Stop / Restart. Для подключения к комнате отправьте URL."
-		kb = buildMenuKeyboard(b.cfg.IsClient)
+		kb = buildMenuKeyboard(b.cfg.IsClient, b.controller.Status().AwgPresent)
 		cl.Info("bot", "Menu keyboard attached", logger.Block("CommandDispatch"), logger.Status("OK"), logger.Importance(5))
 	case text == "/s":
 		responseText = b.handleStatus()
@@ -227,10 +227,10 @@ func (b *Bot) handle(m wrapper.NewMessage) {
 			parts := strings.Fields(m.Text)
 			if len(parts) == 2 {
 				mode := strings.ToLower(parts[1])
-				if mode == singbox.ModeProxy || mode == singbox.ModeDirect {
+				if mode == singbox.ModeProxy || mode == singbox.ModeAwg || mode == singbox.ModeDirect {
 					responseText = b.handleSetRouteMode(mode)
 				} else {
-					responseText = "Некорректный режим. Используй proxy или direct"
+					responseText = "Некорректный режим. Используй proxy, awg или direct"
 				}
 			} else {
 				responseText = b.handleSetRouteCmd(text)
@@ -253,6 +253,10 @@ func (b *Bot) handle(m wrapper.NewMessage) {
 			case "mode-direct":
 				if b.cfg.IsClient {
 					responseText = b.handleSetRouteMode(singbox.ModeDirect)
+				}
+			case "mode-awg":
+				if b.cfg.IsClient {
+					responseText = b.handleSetRouteMode(singbox.ModeAwg)
 				}
 			}
 		} else if p, ok := provider.Parse(text); ok {
@@ -298,11 +302,11 @@ func (b *Bot) handleRestart() string {
 func (b *Bot) handleSetRouteCmd(text string) string {
 	parts := strings.Fields(text)
 	if len(parts) != 2 {
-		return "Usage: /m proxy | /m direct"
+		return "Usage: /m proxy | /m awg | /m direct"
 	}
 	mode := strings.ToLower(parts[1])
-	if mode != singbox.ModeProxy && mode != singbox.ModeDirect {
-		return "Некорректный режим. Используй proxy или direct"
+	if mode != singbox.ModeProxy && mode != singbox.ModeAwg && mode != singbox.ModeDirect {
+		return "Некорректный режим. Используй proxy, awg или direct"
 	}
 	if err := b.controller.SetRoute(mode); err != nil {
 		return "Ошибка: " + err.Error()

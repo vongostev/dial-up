@@ -25,10 +25,11 @@ var menuButtons = []buttonSpec{
 
 var modeButtons = []buttonSpec{
 	{Label: "🌐 Proxy", Action: "mode-proxy", Color: "positive"},
+	{Label: "🛰 AWG", Action: "mode-awg", Color: "secondary"},
 	{Label: "🔗 Direct", Action: "mode-direct", Color: "secondary"},
 }
 
-func buildMenuKeyboard(isClient bool) *object.MessagesKeyboard {
+func buildMenuKeyboard(isClient, awgPresent bool) *object.MessagesKeyboard {
 	kb := object.NewMessagesKeyboard(object.BaseBoolInt(false))
 	kb.AddRow()
 	for _, spec := range menuButtons {
@@ -37,6 +38,11 @@ func buildMenuKeyboard(isClient bool) *object.MessagesKeyboard {
 	if isClient {
 		kb.AddRow()
 		for _, spec := range modeButtons {
+			// The AWG button only appears when an AmneziaWG interface exists;
+			// without it the behavior stays exactly as before (proxy/direct).
+			if spec.Action == "mode-awg" && !awgPresent {
+				continue
+			}
 			kb.AddTextButton(spec.Label, struct{ Action string }{spec.Action}, spec.Color)
 		}
 	}

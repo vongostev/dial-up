@@ -102,14 +102,16 @@ TPROXY_OURS=0
 remove_if_match "sing-box config.json"    "$REPO_DIR/deploy/openwrt/sing-box-config.json" "/etc/sing-box/config.json"
 remove_if_match "sing-box whitelist.json" "$REPO_DIR/deploy/openwrt/whitelist.json"        "/etc/sing-box/whitelist.json"
 
-# Extract the tproxy.nft body from setup-singbox-tproxy.sh (the only heredoc).
-TPROXY_NFT_TMP=$(mktemp)
-awk "/tproxy\.nft <<.EOF./{f=1;next} /^EOF\$/{f=0} f" \
-    "$REPO_DIR/deploy/openwrt/setup-singbox-tproxy.sh" > "$TPROXY_NFT_TMP" 2>/dev/null
-if remove_if_match "tproxy.nft" "$TPROXY_NFT_TMP" "/etc/sing-box/tproxy.nft"; then
+# tproxy.nft is generated dynamically by setup-singbox-tproxy.sh (the bypass
+# subnets are resolved at install time), so byte-exact comparison against the
+# repo is not possible. Treat the deployment as ours when the file is
+# structurally the dial-up tproxy chain (chain name + redirect to :2080).
+if ssh $SSH_OPTS "$HOST" "grep -q 'chain singbox_tproxy' /etc/sing-box/tproxy.nft && grep -q 'tproxy ip to 127.0.0.1:2080' /etc/sing-box/tproxy.nft" 2>/dev/null; then
     TPROXY_OURS=1
+    info "tproxy.nft: matched dial-up tproxy structure"
+else
+    warn "tproxy.nft: not matched (missing or customized)"
 fi
-rm -f "$TPROXY_NFT_TMP"
 
 # Remove /etc/sing-box dir only if empty (never removes a dir with other files).
 ssh $SSH_OPTS "$HOST" "rmdir /etc/sing-box 2>/dev/null; exit 0" || true
@@ -130,12 +132,12 @@ else
 fi
 
 # ── Remove LuCI app ────────────────────────────────────────
-info "Removing LuCI olcRTC app..."
+info "Removing LuCI dial-up app..."
 ssh $SSH_OPTS "$HOST" "\
-rm -f /usr/libexec/rpcd/olcrtc-bot \
-      /usr/share/rpcd/acl.d/luci-app-olcrtc.json \
-      /usr/share/luci/menu.d/luci-app-olcrtc.json; \
-rm -rf /www/luci-static/resources/view/olcrtc; \
+rm -f /usr/libexec/rpcd/dial-up-bot \
+      /usr/share/rpcd/acl.d/luci-app-dial-up.json \
+      /usr/share/luci/menu.d/luci-app-dial-up.json; \
+rm -rf /www/luci-static/resources/view/dial-up; \
 /etc/init.d/rpcd restart 2>/dev/null; \
 exit 0" || warn "LuCI cleanup partially failed"
 info "LuCI app removed"
@@ -167,10 +169,10 @@ check() {
 check "Binary removed"        "[ ! -f '$ROUTER_BIN' ]"
 check "OlcRTC binary removed" "[ ! -f '$ROUTER_OLCRTC' ]"
 check "Init removed"          "[ ! -f '$ROUTER_INIT' ]"
-check "Init disabled"         "! find /etc/rc.d -name '*olcrtc*' 2>/dev/null | grep -q ."
-check "LuCI menu removed"     "[ ! -f /usr/share/luci/menu.d/luci-app-olcrtc.json ]"
-check "rpcd backend removed"  "[ ! -f /usr/libexec/rpcd/olcrtc-bot ]"
-check "LuCI views removed"    "[ ! -d /www/luci-static/resources/view/olcrtc ]"
+check "Init disabled"         "! find /etc/rc.d -name '*dial-up*' 2>/dev/null | grep -q ."
+check "LuCI menu removed"     "[ ! -f /usr/share/luci/menu.d/luci-app-dial-up.json ]"
+check "rpcd backend removed"  "[ ! -f /usr/libexec/rpcd/dial-up-bot ]"
+check "LuCI views removed"    "[ ! -d /www/luci-static/resources/view/dial-up ]"
 
 # tproxy checks only apply when we owned the tproxy deployment.
 if [ "$TPROXY_OURS" = "1" ]; then

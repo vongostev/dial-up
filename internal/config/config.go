@@ -12,6 +12,8 @@ import (
 	"errors"
 	"fmt"
 	"strconv"
+	"strings"
+	"time"
 
 	"github.com/caarlos0/env/v11"
 )
@@ -38,6 +40,19 @@ type Config struct {
 	SocksProxyUser   string `env:"SOCKS_PROXY_USER"    envDefault:""`
 	SocksProxyPass   string `env:"SOCKS_PROXY_PASS"    envDefault:""`
 	NetDNS           string `env:"NET_DNS"             envDefault:"127.0.0.1:53"`
+	// AwgIface overrides the AmneziaWG interface used for the awg route.
+	// Empty = auto-detect: the single amneziawg interface (UCI proto) is used;
+	// with several interfaces it must be set explicitly.
+	AwgIface string `env:"AWG_IFACE" envDefault:""`
+	// AwgHandshakeMax is the max age (seconds) of the latest AWG handshake
+	// for the interface to be considered online.
+	AwgHandshakeMax int `env:"AWG_HANDSHAKE_MAX" envDefault:"180"`
+	// DefaultMode is the standing route when direct internet is available:
+	// "awg" or "direct". "awg" falls back to direct when awg is offline.
+	DefaultMode string `env:"DEFAULT_MODE" envDefault:"direct"`
+	// ProbeURL is the site probed to detect direct internet presence.
+	// Empty disables the probe. A 2xx/3xx response means direct access works.
+	ProbeURL string `env:"PROBE_URL" envDefault:"https://www.google.com/generate_204"`
 }
 
 // Load parses environment variables into a Config struct.
@@ -72,4 +87,25 @@ func (c *Config) validateSocksPort() error {
 		return fmt.Errorf("SOCKS_PROXY_PORT %w", ErrInvalidSocksPort)
 	}
 	return nil
+}
+
+// to a sane 180s default when the value is missing or non-positive.
+
+// AwgHandshakeMaxAge returns the handshake-freshness threshold for the awg route.
+func (c *Config) AwgHandshakeMaxAge() time.Duration {
+	if c.AwgHandshakeMax <= 0 {
+		return 180 * time.Second
+	}
+	return time.Duration(c.AwgHandshakeMax) * time.Second
+}
+
+// ProbeEnabled reports whether the direct-internet probe is enabled.
+func (c *Config) ProbeEnabled() bool {
+	return c.ProbeURL != ""
+}
+
+// AwgPreferred reports whether awg is the configured standing route
+// (DEFAULT_MODE=awg, case-insensitive).
+func (c *Config) AwgPreferred() bool {
+	return strings.EqualFold(c.DefaultMode, "awg")
 }

@@ -12,6 +12,7 @@ graph TB
         NFT["nftables tproxy<br/>(fw4)"]
         SB["sing-box<br/>tproxy:2080<br/>Clash API:9090"]
         SB_PROXY["proxy → 127.0.0.1:1080"]
+        SB_AWG["awg → awg0<br/>(AmneziaWG)"]
         SB_DIRECT["direct → direct out"]
         OC["olcrtc client<br/>SOCKS5:1080"]
         DIALUP_C["dial-up (Go bot)<br/>VK API | :9091"]
@@ -19,6 +20,7 @@ graph TB
 
         LAN --> NFT --> SB
         SB --> SB_PROXY --> OC
+        SB --> SB_AWG
         SB --> SB_DIRECT
         DIALUP_C --> LUCI_C
         DIALUP_C -.->|"управляет"| OC
@@ -68,11 +70,12 @@ dial-up/
 │   ├── init.d/dial-up               # procd init-скрипт
 │   ├── dial-up.env.sample           # Шаблон конфигурации
 │   ├── setup-singbox-tproxy.sh      # Настройка tproxy (UCI + nft + fw4)
+│   ├── setup-amnezia-awg.sh         # Настройка AmneziaWG (UCI + policy-routing)
 │   ├── sing-box-config.json         # Конфигурация sing-box
 │   └── whitelist.json               # Whitelist доменов (direct access)
 │
-├── luci-app-olcrtc/
-│   ├── htdocs/.../view/olcrtc/
+├── luci-app-dial-up/
+│   ├── htdocs/.../view/dial-up/
 │   │   ├── bot.js                   # Вкладка Bot: роль, токен, настройки
 │   │   ├── tunnel.js                # Вкладка Tunnel: ключ, провайдер, SOCKS5
 │   │   ├── network.js               # Вкладка Network: маршрутизатор
@@ -81,12 +84,14 @@ dial-up/
 │   │   ├── statusbar.js             # Общий компонент: статусбар
 │   │   └── logs.js                  # Вкладка Logs: мультиисточник
 │   ├── root/usr/libexec/rpcd/
-│   │   └── olcrtc-bot               # rpcd-бэкенд (15 ubus-методов)
+│   │   └── dial-up-bot               # rpcd-бэкенд (15 ubus-методов)
 │   └── root/usr/share/
 │       ├── luci/menu.d/...json      # Регистрация меню
 │       └── rpcd/acl.d/...json       # ACL-правила
 │
 ├── bin/                             # Скомпилированные бинарники (arm64)
+├── scripts/                         # Вспомогательные скрипты (scrub-history.sh)
+├── docs/                            # Дополнительная документация (tunnel-corp-dns.md)
 └── tests/                           # Тесты
 ```
 
@@ -139,7 +144,8 @@ type Config struct {
 - **Счётчики сбоев**: `failures` (все), `crash_failures` (неожиданные)
 - **Provider management**: сохранение/удаление последнего провайдера (`last_provider.json`)
 - **Definitive vs transient errors**: при ошибке авторизации (403) провайдер удаляется немедленно
-- **tproxy guardian** (только клиент): мониторит доступность sing-box и переключает маршрут при сбое
+- **tproxy guardian** (только клиент): мониторит доступность sing-box и переключает маршрут при сбое; при настроенном AmneziaWG demote идёт на `awg` (если онлайн) иначе `direct`, плюс watchdog awg→direct при офлайне
+- **Probe прямого интернета** (только клиент + awg): HTTP-проверка `PROBE_URL` каждые 30с — при доступном прямом интернете маршрут переключается на `DEFAULT_MODE` (awg|direct) и olcrtc останавливается (экономия трафика); при недоступном — туннель возобновляется (`proxy`)
 - **Стабильность**: при стабильном соединении >30 сек автоматически переключается на `proxy`
 - **Status snapshot**: `controller.Status()` возвращает иммутабельный снимок состояния
 
@@ -148,7 +154,7 @@ type Config struct {
 VK long-poll бот на базе `github.com/SevereCloud/vksdk/v3`:
 
 - Парсинг ссылок: Telemost (`telemost.yandex.ru/j/...`, `telemost.360.yandex.ru/j/...`), WBStream (`stream.wb.ru/room/...`, `wbstream://...`)
-- Команды: `/s`, `/n`, `/r`, `/wb`, `/tm`, `/m proxy|direct`, `/menu`, `/start`
+- Команды: `/s`, `/n`, `/r`, `/wb`, `/tm`, `/m proxy|awg|direct`, `/menu`, `/start`
 - Inline-клавиатура с кнопками
 - Фильтрация по `ALLOWED_USER_IDS`
 - Префиксы ответов: клиент --- `📺 Клиент`, сервер --- `📡 Сервер`
@@ -158,7 +164,7 @@ VK long-poll бот на базе `github.com/SevereCloud/vksdk/v3`:
 
 Интеграция с sing-box через Clash API (`127.0.0.1:9090`):
 
-- `SwitchRoute("proxy"|"direct")` --- PUT `/proxies/route-select`
+- `SwitchRoute("proxy"|"awg"|"direct")` --- PUT `/proxies/route-select`
 - `GetStatus()` --- GET `/proxies/route-select` → `.now` (текущий маршрут) + alive-проба
 - Используется контроллером для автоматического переключения
 
@@ -188,7 +194,7 @@ HTTP-сервер на loopback (`127.0.0.1:9091`):
 
 ```mermaid
 graph LR
-    A["LAN (br-lan)"] --> B{"Private ranges?"}
+    A["LAN (br-lan)"] --> B{"Локальные подсети?<br/>(loopback, br-lan, WAN)"}
     B -->|Да| C["accept"]
     B -->|Нет| D{"UDP: 53, 67, 68?"}
     D -->|Да| C
@@ -198,7 +204,11 @@ graph LR
 
 UCI policy routing: `fwmark 0x1 → table 100 → local route` --- перенаправляет помеченный трафик на localhost.
 
+Список байпаса в `tproxy.nft` генерируется `deploy/openwrt/setup-singbox-tproxy.sh` динамически: в него попадают только подсети, напрямую подключённые к клиентскому роутеру (loopback, br-lan, WAN/USB). Весь остальной RFC1918 --- включая внутреннюю сеть за домашним сервером (LAN, корпоративная сеть и т.п.) --- НЕ байпасится: при поднятом туннеле (селектор `proxy`) уходит в olcrtc и становится доступен LAN-клиентам. Раньше здесь был жёсткий байпас всего `{10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16}`, из-за чего внутренняя сеть была недоступна с клиентского роутера.
+
 UDP:53 (DNS) исключён из tproxy --- запросы LAN-клиентов идут в dnsmasq напрямую.
+
+Для трафика, уходящего в туннель, выполняется **clamp MSS (1200)**: WebRTC-туннель (vp8channel) не тянет крупные TCP-сегменты --- без клэмпа зависал TLS-хендшейк с большими цепочками сертификатов (sso/confluence), хотя мелкие ответы (302, DNS) проходили.
 
 Правила активны всегда --- безопасность обеспечивается селектором sing-box (`direct` по умолчанию).
 
@@ -207,11 +217,12 @@ UDP:53 (DNS) исключён из tproxy --- запросы LAN-клиенто�
 Конфигурация (`/etc/sing-box/config.json`):
 
 - **Inbound**: tproxy на порту 2080
-- **Outbounds**: `proxy` (SOCKS5 → 127.0.0.1:1080 → olcrtc), `direct` (с `domain_resolver: yandex`), `route-select` (selector)
+- **Outbounds**: `proxy` (SOCKS5 → 127.0.0.1:1080 → olcrtc), `direct` (с `domain_resolver: yandex`), `awg` (direct + `bind_interface: awg0` + `routing_mark: 2`, если AmneziaWG настроен), `route-select` (selector)
 - **Route rules**: whitelist → direct, остальное → route-select
 - **DNS**: Yandex (77.88.8.8) для direct-резолвера, local для .lan/.internal
+- **DNS-in (клиент)**: inbound `dns-in` (`127.0.0.1:5353`, type direct) + route rule `hijack-dns` (scope `dns-in`). dnsmasq на клиенте форвардит корп-домены (`server=/CORP-DOMAIN/.../127.0.0.1#5353` + `rebind_domain`) в sing-box, который резолвит их через `corp-dns` --- TCP `CORP_DNS_SERVER:53` с `detour: route-select` (DNS следует за активным режимом селектора). UDP через SOCKS-туннель не работает (vp8channel), поэтому корп-DNS только по TCP. Настройка: `deploy/openwrt/setup-tunnel-corp-dns.sh`; подробности: `docs/tunnel-corp-dns.md`.
 - **Без `default_domain_resolver`**: SOCKS outbound не резолвит домены, передаёт их как SOCKS5 ATYP=3 (domain) в olcrtc
-- **Sniff с `override_destination: true`**: заменяет destination IP на сниффнутый домен (TLS SNI / HTTP Host), чтобы SOCKS outbound отправлял ATYP=3 (domain), а не IP. Без этого флага sing-box только обогащает метаданные для маршрутизации, но destination остаётся IP.
+- **Sniff**: обогащает метаданные для маршрутизации (TLS SNI / HTTP Host); поле `override_destination` устарело и не используется
 - **Clash API**: 127.0.0.1:9090 --- управление селектором
 
 #### Whitelist
@@ -220,11 +231,11 @@ UDP:53 (DNS) исключён из tproxy --- запросы LAN-клиенто�
 
 ---
 
-### 3. LuCI-панель (`luci-app-olcrtc/`)
+### 3. LuCI-панель (`luci-app-dial-up/`)
 
 #### Меню: Services → dial-up!
 
-4 вкладки, rpcd-бэкенд (POSIX shell, 14 ubus-методов), JS-views.
+4 вкладки, rpcd-бэкенд (POSIX shell, 15 ubus-методов), JS-views.
 
 #### Вкладка Bot (`bot.js`)
 
@@ -245,8 +256,8 @@ UDP:53 (DNS) исключён из tproxy --- запросы LAN-клиенто�
 
 **Клиент:**
 - Статус sing-box: alive/dead, текущий маршрут
-- Переключатель маршрута: Proxy / Direct
-- Пинг DNS (9.9.9.9) и пинг через туннель (Clash delay-test)
+- Переключатель маршрута: Proxy / AWG / Direct (карточки-селекторы; AWG «disabled», если не настроен)
+- Топология Live Traffic Flow: правила sing-box (local/.lan/.internal → direct, whitelist → direct, остальное → route-select)
 - Firewall: nft chain, fw4 include, ip rule, ip route, слушатель :2080, conntrack
 - Whitelist: просмотр и редактирование доменов
 
@@ -259,7 +270,11 @@ UDP:53 (DNS) исключён из tproxy --- запросы LAN-клиенто�
 - Количество строк, фильтр
 - Обновление по запросу
 
-#### rpcd-бэкенд (`olcrtc-bot`)
+#### Статусбар (`statusbar.js`)
+
+Общая верхняя панель всех вкладок. Карточки: **Bot**, **Tunnel** (RTT туннеля + DNS-пинг), **Clients** (только сервер), **LAN Route / Egress**. На клиенте карточка маршрута показывает активный режим (`proxy`/`awg`/`direct`) и доступность прямого интернета («Free»/«Restricted»); `awg` — с бейджем online/offline.
+
+#### rpcd-бэкенд (`dial-up-bot`)
 
 POSIX shell скрипт, регистрируется как ubus-объект:
 
@@ -427,8 +442,9 @@ flowchart TD
 - **Маскировка**: для оператора и DPI трафик выглядит как обычный WebRTC-видеозвонок через разрешённый сервис (Телемост, WBStream)
 - **ACL**: VK-бот фильтрует команды по `ALLOWED_USER_IDS`
 - **Loopback only**: statusapi и Clash API слушают только на 127.0.0.1
-- **LuCI ACL**: rpcd-бэкенд защищён файлом ACL (`luci-app-olcrtc.json`)
+- **LuCI ACL**: rpcd-бэкенд защищён файлом ACL (`luci-app-dial-up.json`)
 - **Env-файл**: `/etc/dial-up.env` содержит секреты, доступен только root
+- **Конфиденциальность репозитория**: реальные значения (IP, домены, подсети) выносятся в env/плейсхолдеры; `scripts/scrub-history.sh` (git filter-repo) и `.githooks/pre-push` защищают историю от утечки приватных данных при пуше
 
 ## Совместимость
 

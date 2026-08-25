@@ -19,12 +19,6 @@ func RenderStatus(s Status) string {
 	b.WriteString("🤖 Статус\n")
 	b.WriteString("━━━━━━━━━━━━━━━━\n")
 
-	if s.VkAlive {
-		b.WriteString("🟢 Бот: в сети\n")
-	} else {
-		b.WriteString("🔴 Бот: не в сети\n")
-	}
-
 	if s.TunnelAlive {
 		b.WriteString("🟢 Тоннель: работает\n")
 	} else {
@@ -115,9 +109,15 @@ func RenderStatus(s Status) string {
 		b.WriteString("\n")
 	}
 
-	// Manual DIRECT lock indicator
+	// Manual non-proxy lock indicator (client only)
 	if s.ManualDirect {
-		b.WriteString("🔒 Маршрут зафиксирован: direct\n")
+		b.WriteString("🔒 Маршрут зафиксирован: ")
+		if s.SingBoxRoute != "" {
+			b.WriteString(s.SingBoxRoute)
+		} else {
+			b.WriteString("—")
+		}
+		b.WriteString("\n")
 	}
 
 	// Tunnel RTT (client only: TunnelRTTMs != nil)
@@ -125,6 +125,39 @@ func RenderStatus(s Status) string {
 		b.WriteString("⚡ RTT туннеля: ")
 		b.WriteString(strconv.Itoa(*s.TunnelRTTMs))
 		b.WriteString("ms\n")
+	}
+
+	// AWG status (client only: awg interface resolved)
+	if s.AwgIface != "" {
+		b.WriteString("🛰 AWG (")
+		b.WriteString(s.AwgIface)
+		b.WriteString("): ")
+		if s.AwgPresent {
+			if s.AwgOnline != nil && *s.AwgOnline {
+				b.WriteString("🟢 онлайн")
+			} else {
+				b.WriteString("⚪ офлайн")
+			}
+		} else {
+			b.WriteString("⚪ не настроен")
+		}
+		b.WriteString("\n")
+	}
+
+	// Direct-internet probe (client only)
+	if s.DirectOnline != nil {
+		b.WriteString("🌐 Прямой доступ: ")
+		if *s.DirectOnline {
+			b.WriteString("есть")
+		} else {
+			b.WriteString("нет")
+		}
+		b.WriteString("\n")
+	}
+
+	// Probe-driven halt (traffic saving)
+	if s.TunnelHalted {
+		b.WriteString("⏸ Тоннель остановлен (экономия трафика)\n")
 	}
 
 	return b.String()

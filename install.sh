@@ -1,7 +1,7 @@
 #!/bin/sh
 # =============================================================================
 # Install / Upgrade dial-up on OpenWrt from GitHub
-# Project: https://github.com/vongostev/OlcRTC-OpenWRT-VK-Bot
+# Project: https://github.com/vongostev/dial-up
 #
 # Modes:
 #   Fresh install (default)     : sh -c "$(wget -qO- .../install.sh)"
@@ -24,9 +24,14 @@ SOCKS_PROXY_ADDR="${SOCKS_PROXY_ADDR:-}"
 SOCKS_PROXY_PORT="${SOCKS_PROXY_PORT:-1080}"
 SOCKS_PROXY_USER="${SOCKS_PROXY_USER:-}"
 SOCKS_PROXY_PASS="${SOCKS_PROXY_PASS:-}"
+# AmneziaWG fallback routing (client): auto-detected unless AWG_IFACE is set
+DEFAULT_MODE="${DEFAULT_MODE:-direct}"
+PROBE_URL="${PROBE_URL:-https://www.google.com/generate_204}"
+AWG_IFACE="${AWG_IFACE:-}"
+AWG_HANDSHAKE_MAX="${AWG_HANDSHAKE_MAX:-180}"
 
 # ── URLs ──────────────────────────────────────────────────
-REPO_RAW="https://raw.githubusercontent.com/vongostev/OlcRTC-OpenWRT-VK-Bot/main"
+REPO_RAW="https://raw.githubusercontent.com/vongostev/dial-up/main"
 BOT_BINARY_URL="${REPO_RAW}/bin/dial-up-linux-arm64"
 OLCRTC_BINARY_URL="${REPO_RAW}/bin/olcrtc-linux-arm64"
 INIT_URL="${REPO_RAW}/deploy/openwrt/init.d/dial-up"
@@ -189,27 +194,27 @@ install_tproxy() {
 
 # Install LuCI application files.
 install_luci() {
-    log "Installing LuCI olcRTC app..."
-    local LUCI_BASE="${REPO_RAW}/luci-app-olcrtc"
+    log "Installing LuCI dial-up app..."
+    local LUCI_BASE="${REPO_RAW}/luci-app-dial-up"
 
     mkdir -p /usr/libexec/rpcd
-    wget -q -O /usr/libexec/rpcd/olcrtc-bot "${LUCI_BASE}/root/usr/libexec/rpcd/olcrtc-bot" || warn "Failed to download rpcd backend"
-    chmod 755 /usr/libexec/rpcd/olcrtc-bot
+    wget -q -O /usr/libexec/rpcd/dial-up-bot "${LUCI_BASE}/root/usr/libexec/rpcd/dial-up-bot" || warn "Failed to download rpcd backend"
+    chmod 755 /usr/libexec/rpcd/dial-up-bot
 
     mkdir -p /usr/share/rpcd/acl.d
-    wget -q -O /usr/share/rpcd/acl.d/luci-app-olcrtc.json "${LUCI_BASE}/root/usr/share/rpcd/acl.d/luci-app-olcrtc.json" || warn "Failed to download ACL"
+    wget -q -O /usr/share/rpcd/acl.d/luci-app-dial-up.json "${LUCI_BASE}/root/usr/share/rpcd/acl.d/luci-app-dial-up.json" || warn "Failed to download ACL"
 
     mkdir -p /usr/share/luci/menu.d
-    wget -q -O /usr/share/luci/menu.d/luci-app-olcrtc.json "${LUCI_BASE}/root/usr/share/luci/menu.d/luci-app-olcrtc.json" || warn "Failed to download menu"
+    wget -q -O /usr/share/luci/menu.d/luci-app-dial-up.json "${LUCI_BASE}/root/usr/share/luci/menu.d/luci-app-dial-up.json" || warn "Failed to download menu"
 
-    mkdir -p /www/luci-static/resources/view/olcrtc
+    mkdir -p /www/luci-static/resources/view/dial-up
     for f in statusbar bot tunnel network network_client network_server logs; do
-        wget -q -O "/www/luci-static/resources/view/olcrtc/$f.js" \
-            "${LUCI_BASE}/htdocs/luci-static/resources/view/olcrtc/$f.js" || warn "Failed to download $f.js"
+        wget -q -O "/www/luci-static/resources/view/dial-up/$f.js" \
+            "${LUCI_BASE}/htdocs/luci-static/resources/view/dial-up/$f.js" || warn "Failed to download $f.js"
     done
 
     /etc/init.d/rpcd restart 2>/dev/null || warn "rpcd restart failed"
-    info "LuCI olcRTC app installed"
+    info "LuCI dial-up app installed"
 }
 
 # Write /etc/dial-up.env. Interactive or headless depending on NONINTERACTIVE.
@@ -248,6 +253,10 @@ SOCKS_PROXY_ADDR=$SOCKS_PROXY_ADDR
 SOCKS_PROXY_PORT=$SOCKS_PROXY_PORT
 SOCKS_PROXY_USER=$SOCKS_PROXY_USER
 SOCKS_PROXY_PASS=$SOCKS_PROXY_PASS
+DEFAULT_MODE=direct
+PROBE_URL=https://www.google.com/generate_204
+AWG_IFACE=
+AWG_HANDSHAKE_MAX=180
 ENV_EOF
         info "Env file created (non-interactive): $ENV_FILE"
         return 0
@@ -342,6 +351,10 @@ SOCKS_PROXY_ADDR=$SOCKS_PROXY_ADDR_INPUT
 SOCKS_PROXY_PORT=$SOCKS_PROXY_PORT_INPUT
 SOCKS_PROXY_USER=$SOCKS_PROXY_USER_INPUT
 SOCKS_PROXY_PASS=$SOCKS_PROXY_PASS_INPUT
+DEFAULT_MODE=direct
+PROBE_URL=https://www.google.com/generate_204
+AWG_IFACE=
+AWG_HANDSHAKE_MAX=180
 ENV_EOF
             info "Env file created: $ENV_FILE"
             ;;
@@ -381,11 +394,11 @@ verify() {
         check "tproxy nft chain active"          "nft list chain inet fw4 singbox_tproxy >/dev/null 2>&1"
     fi
 
-    check "LuCI olcRTC menu exists"  "[ -f /usr/share/luci/menu.d/luci-app-olcrtc.json ]"
-    check "rpcd backend exists"      "[ -x /usr/libexec/rpcd/olcrtc-bot ]"
-    check "rpcd ACL exists"          "[ -f /usr/share/rpcd/acl.d/luci-app-olcrtc.json ]"
-    check "LuCI bot.js exists"       "[ -f /www/luci-static/resources/view/olcrtc/bot.js ]"
-    check "LuCI statusbar.js exists" "[ -f /www/luci-static/resources/view/olcrtc/statusbar.js ]"
+    check "LuCI dial-up menu exists"  "[ -f /usr/share/luci/menu.d/luci-app-dial-up.json ]"
+    check "rpcd backend exists"      "[ -x /usr/libexec/rpcd/dial-up-bot ]"
+    check "rpcd ACL exists"          "[ -f /usr/share/rpcd/acl.d/luci-app-dial-up.json ]"
+    check "LuCI bot.js exists"       "[ -f /www/luci-static/resources/view/dial-up/bot.js ]"
+    check "LuCI statusbar.js exists" "[ -f /www/luci-static/resources/view/dial-up/statusbar.js ]"
 
     local OVERLAY_USAGE
     OVERLAY_USAGE=$(df -h /overlay | awk 'NR==2{print $3" / "$2" ("$5" used)"}')

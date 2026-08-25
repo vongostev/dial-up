@@ -1,7 +1,7 @@
 #!/bin/sh
 # =============================================================================
 # Deploy dial-up to OpenWrt router via SSH
-# Usage: ./deploy.sh [client|server] [user@host]    (default: client root@192.168.1.1)
+# Usage: ./deploy.sh [client|server] [user@host] [port]    (default: client root@192.168.1.1:22; SSH_PORT env overrides)
 # =============================================================================
 
 set -e
@@ -9,8 +9,9 @@ set -e
 # Positional arguments: ./deploy.sh [client|server] [user@host]
 TYPE="${1:-client}"
 HOST="${2:-root@192.168.1.1}"
+SSH_PORT="${3:-${SSH_PORT:-22}}"
 REPO_DIR="$(cd "$(dirname "$0")" && pwd)"
-SSH_OPTS="-o LogLevel=ERROR -o ConnectTimeout=5 -o StrictHostKeyChecking=no -o Port=22"
+SSH_OPTS="-o LogLevel=ERROR -o ConnectTimeout=5 -o StrictHostKeyChecking=no -o Port=${SSH_PORT}"
 
 BINARY="$REPO_DIR/bin/dial-up-linux-arm64"
 OLCRTC_BINARY="$REPO_DIR/bin/olcrtc-linux-arm64"
@@ -37,6 +38,11 @@ SOCKS_PROXY_PORT=${SOCKS_PROXY_PORT:-}
 SOCKS_PROXY_USER=${SOCKS_PROXY_USER:-}
 SOCKS_PROXY_PASS=${SOCKS_PROXY_PASS:-}
 NET_DNS=${NET_DNS:-127.0.0.1:53}
+# AmneziaWG fallback routing (client): auto-detected unless AWG_IFACE is set
+DEFAULT_MODE=${DEFAULT_MODE:-direct}
+PROBE_URL=${PROBE_URL:-https://www.google.com/generate_204}
+AWG_IFACE=${AWG_IFACE:-}
+AWG_HANDSHAKE_MAX=${AWG_HANDSHAKE_MAX:-180}
 
 GREEN='\033[32m'
 RED='\033[31m'
@@ -195,26 +201,26 @@ else
 fi
 
 # ── Deploy LuCI app ────────────────────────────────────────
-log "Deploying LuCI olcRTC app..."
+log "Deploying LuCI dial-up app..."
 # Ensure target directories exist
-ssh $SSH_OPTS "$HOST" "mkdir -p /usr/libexec/rpcd /usr/share/rpcd/acl.d /usr/share/luci/menu.d /www/luci-static/resources/view/olcrtc"
+ssh $SSH_OPTS "$HOST" "mkdir -p /usr/libexec/rpcd /usr/share/rpcd/acl.d /usr/share/luci/menu.d /www/luci-static/resources/view/dial-up"
 # rpcd backend
-cat "$REPO_DIR/luci-app-olcrtc/root/usr/libexec/rpcd/olcrtc-bot" | \
-    ssh $SSH_OPTS "$HOST" "cat > /usr/libexec/rpcd/olcrtc-bot && chmod 755 /usr/libexec/rpcd/olcrtc-bot"
+cat "$REPO_DIR/luci-app-dial-up/root/usr/libexec/rpcd/dial-up-bot" | \
+    ssh $SSH_OPTS "$HOST" "cat > /usr/libexec/rpcd/dial-up-bot && chmod 755 /usr/libexec/rpcd/dial-up-bot"
 # ACL
-cat "$REPO_DIR/luci-app-olcrtc/root/usr/share/rpcd/acl.d/luci-app-olcrtc.json" | \
-    ssh $SSH_OPTS "$HOST" "cat > /usr/share/rpcd/acl.d/luci-app-olcrtc.json"
+cat "$REPO_DIR/luci-app-dial-up/root/usr/share/rpcd/acl.d/luci-app-dial-up.json" | \
+    ssh $SSH_OPTS "$HOST" "cat > /usr/share/rpcd/acl.d/luci-app-dial-up.json"
 # Menu
-cat "$REPO_DIR/luci-app-olcrtc/root/usr/share/luci/menu.d/luci-app-olcrtc.json" | \
-    ssh $SSH_OPTS "$HOST" "cat > /usr/share/luci/menu.d/luci-app-olcrtc.json"
+cat "$REPO_DIR/luci-app-dial-up/root/usr/share/luci/menu.d/luci-app-dial-up.json" | \
+    ssh $SSH_OPTS "$HOST" "cat > /usr/share/luci/menu.d/luci-app-dial-up.json"
 # JS views (4 planes + shared statusbar module + network subviews)
 for f in statusbar bot tunnel network network_client network_server logs; do
-    cat "$REPO_DIR/luci-app-olcrtc/htdocs/luci-static/resources/view/olcrtc/$f.js" | \
-        ssh $SSH_OPTS "$HOST" "cat > /www/luci-static/resources/view/olcrtc/$f.js"
+    cat "$REPO_DIR/luci-app-dial-up/htdocs/luci-static/resources/view/dial-up/$f.js" | \
+        ssh $SSH_OPTS "$HOST" "cat > /www/luci-static/resources/view/dial-up/$f.js"
 done
 # Restart rpcd to pick up new backend
 ssh $SSH_OPTS "$HOST" "/etc/init.d/rpcd restart" || warn "rpcd restart failed"
-info "LuCI olcRTC app deployed"
+info "LuCI dial-up app deployed"
 
 # ── Deploy env config ─────────────────────────────────────
 ENV_EXISTS=$(ssh $SSH_OPTS "$HOST" "[ -f $ROUTER_ENV ] && echo yes || echo no")
@@ -236,6 +242,10 @@ SOCKS_PROXY_PORT=$SOCKS_PROXY_PORT
 SOCKS_PROXY_USER=$SOCKS_PROXY_USER
 SOCKS_PROXY_PASS=$SOCKS_PROXY_PASS
 NET_DNS=$NET_DNS
+DEFAULT_MODE=$DEFAULT_MODE
+PROBE_URL=$PROBE_URL
+AWG_IFACE=$AWG_IFACE
+AWG_HANDSHAKE_MAX=$AWG_HANDSHAKE_MAX
 EOF
         info "Env $ROUTER_ENV (created with VK_TOKEN and OLCRTC_KEY)"
     elif [ -n "$VK_TOKEN" ] || [ -n "$OLCRTC_KEY" ]; then
@@ -287,11 +297,11 @@ if [ "$IS_CLIENT" = "true" ]; then
     check "fw4 include registered"        "uci -q get firewall.singbox_tproxy.path >/dev/null"
     check "tproxy nft chain active"       "nft list chain inet fw4 singbox_tproxy >/dev/null 2>&1"
 fi
-check "LuCI olcRTC menu exists"       "[ -f /usr/share/luci/menu.d/luci-app-olcrtc.json ]"
-check "rpcd backend exists"           "[ -x /usr/libexec/rpcd/olcrtc-bot ]"
-check "rpcd ACL exists"               "[ -f /usr/share/rpcd/acl.d/luci-app-olcrtc.json ]"
-check "LuCI bot.js exists"        "[ -f /www/luci-static/resources/view/olcrtc/bot.js ]"
-check "LuCI statusbar.js exists"      "[ -f /www/luci-static/resources/view/olcrtc/statusbar.js ]"
+check "LuCI dial-up menu exists"       "[ -f /usr/share/luci/menu.d/luci-app-dial-up.json ]"
+check "rpcd backend exists"           "[ -x /usr/libexec/rpcd/dial-up-bot ]"
+check "rpcd ACL exists"               "[ -f /usr/share/rpcd/acl.d/luci-app-dial-up.json ]"
+check "LuCI bot.js exists"        "[ -f /www/luci-static/resources/view/dial-up/bot.js ]"
+check "LuCI statusbar.js exists"      "[ -f /www/luci-static/resources/view/dial-up/statusbar.js ]"
 
 # ── Flash usage (physical, post-GC) ─────────────────────────
 # df reports the actual compressed footprint on UBIFS, unlike logical sizes.
